@@ -1,0 +1,3 @@
+[submodule "dependencies/meshoptimizer"]
+	path = dependencies/meshoptimizer
+	url = https://github.com/zeux/meshoptimizer.git
