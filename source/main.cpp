@@ -30,8 +30,8 @@ struct RSDKModelFlags
 
 struct RSDKModelVertex
 {
-	int32_t x, y, z;
-	int32_t nx, ny, nz;
+	float x, y, z;
+	float nx, ny, nz;
 };
 
 struct RSDKTexCoord
@@ -158,23 +158,21 @@ RSDKModel load_model(std::ifstream& file)
 
 			RSDKModelVertex& vertex = model.vertices[i];
 
-			// FIXME: engine code multiplies by this magic number. do we need it?
-			vertex.x = read_t<int32_t>(file) * 0x100;
-			vertex.y = read_t<int32_t>(file) * 0x100;
-			vertex.z = read_t<int32_t>(file) * 0x100;
+			vertex.x = read_t<float>(file);
+			vertex.y = read_t<float>(file);
+			vertex.z = read_t<float>(file);
 
 			if (model.flags & RSDKModelFlags::use_normals)
 			{
-				// FIXME: engine code multiplies by this magic number. do we need it?
-				vertex.nx = read_t<int32_t>(file) * 0x10000;
-				vertex.ny = read_t<int32_t>(file) * 0x10000;
-				vertex.nz = read_t<int32_t>(file) * 0x10000;
+				vertex.nx = read_t<float>(file);
+				vertex.ny = read_t<float>(file);
+				vertex.nz = read_t<float>(file);
 			}
 			else
 			{
-				vertex.nx = 0;
-				vertex.ny = 0;
-				vertex.nz = 0;
+				vertex.nx = 0.0f;
+				vertex.ny = 0.0f;
+				vertex.nz = 0.0f;
 			}
 		}
 	}
