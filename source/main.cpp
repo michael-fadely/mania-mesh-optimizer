@@ -48,7 +48,7 @@ union RSDKColor
 struct RSDKModel
 {
 	uint8_t flags;
-	uint8_t face_vertex_count; // ???
+	uint8_t face_vertex_count; // verts per face
 	uint16_t vertex_count; // important, because this is number of verts per frame :/
 	uint16_t frame_count;
 
@@ -98,6 +98,8 @@ template <typename T>
 
 RSDKModel load_model(std::ifstream& file)
 {
+	RSDKModel model {};
+
 	std::array<char, 4> fourcc {};
 	static_assert(sizeof(char) == sizeof(uint8_t));
 	std::span<uint8_t> bytes_read = read(file, std::span(reinterpret_cast<uint8_t*>(fourcc.data()), fourcc.size()));
@@ -105,10 +107,8 @@ RSDKModel load_model(std::ifstream& file)
 	if (bytes_read.size_bytes() < fourcc.size() || memcmp(fourcc.data(), "MDL\0", fourcc.size()) != 0)
 	{
 		std::cerr << "not a valid RSDK model" << std::endl;
-		return {};
+		return model;
 	}
-
-	RSDKModel model {};
 
 	model.flags = read_t<uint8_t>(file);
 	model.face_vertex_count = read_t<uint8_t>(file);
@@ -140,11 +140,11 @@ RSDKModel load_model(std::ifstream& file)
 		}
 	}
 
-	// ignoring KOS-specific extensions
+	// ignoring KOS-specific extensions for now
 
 	const auto index_count = read_t<uint16_t>(file);
-
 	model.indices.resize(index_count);
+
 	for (uint16_t& index : model.indices)
 	{
 		index = read_t<uint16_t>(file);
@@ -216,7 +216,14 @@ int main(int argc, char** argv)
 
 	RSDKModel model = load_model(file);
 
-	// TODO: something
+	std::cout
+		<< " verts per face: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl
+		<< "verts per frame: " << model.vertex_count << std::endl
+		<< "    frame count: " << model.frame_count << std::endl
+		<< "    total verts: " << model.vertices.size() << std::endl
+		<< " indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl;
+
+	// TODO: optimize mesh
 
 	return 0;
 }
