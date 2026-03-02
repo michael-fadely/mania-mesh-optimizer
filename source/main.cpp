@@ -65,6 +65,13 @@ struct RSDKModel
 	uint16_t loose_tri_count;
 };
 
+struct VertexForOptimizer
+{
+	RSDKModelVertex vertex;
+	// color as floats. I don't care which ones are which color channels.
+	std::array<float, 4> color;
+};
+
 [[nodiscard]] bool equals_case_insensitive(const std::string_view& a, const std::string_view& b)
 {
 	auto fn = [](unsigned char ca, unsigned char cb) { return std::tolower(ca) == std::tolower(cb); };
@@ -214,6 +221,8 @@ int main(int argc, char** argv)
 		return -2;
 	}
 
+	std::cout << "checking file: " << input_path << std::endl << std::endl;
+
 	RSDKModel model = load_model(file);
 
 	std::cout
@@ -221,9 +230,114 @@ int main(int argc, char** argv)
 		<< "verts per frame: " << model.vertex_count << std::endl
 		<< "    frame count: " << model.frame_count << std::endl
 		<< "    total verts: " << model.vertices.size() << std::endl
-		<< " indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl;
+		<< " indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl
+		<< std::endl;
 
-	// TODO: optimize mesh
+	std::vector<VertexForOptimizer> vertices(model.vertex_count);
+	std::vector<uint16_t> indices;
+
+	// copy the first frame of vertices into a contiguous structure so that
+	// meshoptimizer is aware of all components for remapping.
+	for (size_t i = 0; i < vertices.size(); ++i)
+	{
+		const auto& old_vert = model.vertices[i];
+		RSDKColor color;
+
+		if ((model.flags & RSDKModelFlags::use_colors))
+		{
+			color = model.colors[i];
+		}
+		else
+		{
+			color = {};
+		}
+
+		// meshoptmizer suggests memsetting the structure in case there's gaps
+		// because it does byte-wise comparisons.
+		VertexForOptimizer new_vert;
+		memset(&new_vert, 0, sizeof(VertexForOptimizer));
+		new_vert.vertex = old_vert;
+		new_vert.color[0] = static_cast<float>(color.bytes[0]) / 255.0f;
+		new_vert.color[1] = static_cast<float>(color.bytes[1]) / 255.0f;
+		new_vert.color[2] = static_cast<float>(color.bytes[2]) / 255.0f;
+		new_vert.color[3] = static_cast<float>(color.bytes[3]) / 255.0f;
+
+		vertices[i] = new_vert;
+	}
+
+	{
+		std::vector<uint32_t> remap_indices(model.indices.size());
+
+		const size_t remapped_vert_count =
+			meshopt_generateVertexRemap(remap_indices.data(),
+			                            model.indices.data(),
+			                            model.indices.size(),
+			                            vertices.data(),
+			                            vertices.size(),
+			                            sizeof(VertexForOptimizer));
+
+		std::vector<uint16_t> new_indices(model.indices.size());
+		std::vector<VertexForOptimizer> new_vertices(remapped_vert_count);
+
+		meshopt_remapIndexBuffer(new_indices.data(),
+		                         model.indices.data(),
+		                         model.indices.size(),
+		                         remap_indices.data());
+
+		meshopt_remapVertexBuffer(new_vertices.data(),
+		                          vertices.data(),
+		                          vertices.size(),
+		                          sizeof(VertexForOptimizer),
+		                          remap_indices.data());
+
+		indices = std::move(new_indices);
+		vertices = std::move(new_vertices);
+	}
+
+	{
+		constexpr float threshold = 0.2f;
+		constexpr float target_error = 0.01f; // docs use 0.01f (<= 1%) error
+
+		const auto target_index_count = static_cast<size_t>(static_cast<float>(indices.size()) * threshold);
+
+		std::vector<uint16_t> lod_indices(indices.size());
+		float lod_error = 0.0f; // <- reported back from simplify func
+
+		decltype(VertexForOptimizer::color) attribute_weights = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+		// if necessary, texture coordinates could be included; they just need to be immediately
+		// adjacent to the float colors.
+		const size_t new_index_count =
+			meshopt_simplifyWithAttributes(lod_indices.data(),
+			                               indices.data(),
+			                               indices.size(),
+			                               &vertices[0].vertex.x,
+			                               vertices.size(),
+			                               sizeof(VertexForOptimizer),
+			                               vertices[0].color.data(),
+			                               sizeof(VertexForOptimizer),
+			                               attribute_weights.data(),
+			                               attribute_weights.size(),
+			                               nullptr,
+			                               target_index_count,
+			                               target_error,
+			                               /* options */ 0,
+			                               &lod_error);
+
+		const size_t delta = indices.size() - new_index_count;
+
+		std::cout
+			<< "index count change: " << indices.size() << " -> " << new_index_count
+			<< " (" << delta << ')' << std::endl
+			<< " face count change: " << indices.size() / model.face_vertex_count << " -> " << new_index_count / model.face_vertex_count
+			<< " (" << delta / model.face_vertex_count << ')' << std::endl
+			<< std::endl;
+
+		lod_indices.resize(new_index_count);
+		lod_indices.shrink_to_fit();
+	}
+
+	// TODO: output to file
 
 	return 0;
 }
