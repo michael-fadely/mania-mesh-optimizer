@@ -1,6 +1,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <optional>
@@ -426,11 +427,18 @@ int main(int argc, char** argv)
 	const RSDKModel& model = model_maybe.value();
 
 	std::cout
-		<< " verts per face: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl
-		<< "verts per frame: " << model.vertices_per_frame << std::endl
-		<< "    frame count: " << model.frame_count << std::endl
-		<< "    total verts: " << model.vertices.size() << std::endl
-		<< "indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl
+		<< std::format("input model stats:\n"
+		               "\t verts per face: {}\n"
+		               "\tverts per frame: {}\n"
+		               "\t    frame count: {}\n"
+		               "\t    total verts: {}\n"
+		               "\tindices (faces): {} ({})\n",
+		               static_cast<uint16_t>(model.face_vertex_count),
+		               model.vertices_per_frame,
+		               model.frame_count,
+		               model.vertices.size(),
+		               model.indices.size(),
+		               (model.indices.size() / model.face_vertex_count))
 		<< std::endl;
 
 	std::cout << "optimizing..." << std::endl << std::endl;
@@ -543,15 +551,15 @@ int main(int argc, char** argv)
 		}
 
 		std::cout
-			<< "optimization stats:" << std::endl
-			<< "\tverts per frame: " << model.vertices_per_frame << " -> " << new_vertex_count
-			<< " (-" << vert_frame_delta << ')' << std::endl
-			<< "\t    total verts: " << model.vertices.size() << " -> " << vertices.size()
-			<< " (-" << vertex_delta << ')' << std::endl
-			<< "\t    index count: " << model.indices.size() << " -> " << indices.size()
-			<< " (-" << index_delta << ')' << std::endl
-			<< "\t     face count: " << model.indices.size() / model.face_vertex_count << " -> " << indices.size() / model.face_vertex_count
-			<< " (-" << index_delta / model.face_vertex_count << ')' << std::endl
+			<< std::format("optimization stats:\n"
+			               "\tverts per frame: {} -> {} (-{})\n"
+			               "\t    total verts: {} -> {} (-{})\n"
+			               "\t    index count: {} -> {} (-{})\n"
+			               "\t     face count: {} -> {} (-{})\n",
+			               model.vertices_per_frame, new_vertex_count, vert_frame_delta,
+			               model.vertices.size(), vertices.size(), vertex_delta,
+			               model.indices.size(), indices.size(), index_delta,
+			               (model.indices.size() / model.face_vertex_count), (indices.size() / model.face_vertex_count), (index_delta / model.face_vertex_count))
 			<< std::endl;
 	}
 
