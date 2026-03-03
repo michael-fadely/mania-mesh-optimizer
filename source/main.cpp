@@ -468,20 +468,21 @@ int main(int argc, char** argv)
 
 	{
 		constexpr float threshold = 0.2f;
-		constexpr float target_error = 0.01f; // docs use 0.01f (<= 1%) error
+		constexpr float target_error = 0.01f; // docs use 0.01f (1e-2f; <= 1%) error
 
 		const auto target_index_count = static_cast<size_t>(static_cast<float>(indices.size()) * threshold);
 
 		std::vector<uint16_t> lod_indices(indices.size());
 		float lod_error = 0.0f; // <- reported back from simplify func
 
-		decltype(VertexForOptimizer::color) attribute_weights = { 1.0f, 1.0f, 1.0f, 1.0f };
+		// normal x, y, z, followed by color.
+		// these weights might need adjusting...
+		std::array<float, 7> attribute_weights = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
 
 		const std::span frame_vertices(&vertices[0], new_vertex_count);
 
 		// if necessary, texture coordinates could be included; they just need to be immediately
 		// adjacent to the float colors.
-		// TODO: include normals as attributes
 		const size_t new_index_count =
 			meshopt_simplifyWithAttributes(lod_indices.data(),
 			                               indices.data(),
@@ -489,7 +490,7 @@ int main(int argc, char** argv)
 			                               &frame_vertices[0].vertex.x,
 			                               frame_vertices.size(),
 			                               sizeof(VertexForOptimizer),
-			                               frame_vertices[0].color.data(),
+			                               &frame_vertices[0].vertex.nx,
 			                               sizeof(VertexForOptimizer),
 			                               attribute_weights.data(),
 			                               attribute_weights.size(),
