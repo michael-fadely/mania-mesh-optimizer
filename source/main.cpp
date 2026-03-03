@@ -37,7 +37,7 @@ struct RSDKModelVertex
 
 struct RSDKTexCoord
 {
-	float x, y;
+	float u, v;
 };
 
 union RSDKColor
@@ -62,15 +62,17 @@ struct RSDKModel
 	// KOS-specific extensions
 	//
 
-	uint16_t strip_count;
-	uint16_t loose_tri_count;
+	std::vector<uint16_t> strip_lengths;
+	std::vector<uint16_t> strip_indices;
+	std::vector<uint16_t> loose_tri_indices;
 };
 
 struct VertexForOptimizer
 {
-	RSDKModelVertex vertex;
-	// color as floats. I don't care which ones are which color channels.
-	std::array<float, 4> color;
+	float x, y, z; // position
+	float nx, ny, nz; // normal
+	float u, v; // uv (texture) coordinates
+	float cx, cy, cz, cw; // color. don't care which channels are which.
 };
 
 [[nodiscard]] std::span<uint8_t> read(std::ifstream& file, std::span<uint8_t> buffer)
@@ -114,12 +116,6 @@ std::optional<RSDKModel> load_model(std::ifstream& file)
 
 	model.flags = read_t<uint8_t>(file);
 
-	if (model.flags & RSDKModelFlags::use_textures)
-	{
-		std::cerr << "textured models not currently supported" << std::endl;
-		return std::nullopt;
-	}
-
 	if (model.flags & (RSDKModelFlags::is_stripped | RSDKModelFlags::is_baked))
 	{
 		std::cerr << "model is already optimized" << std::endl;
@@ -140,8 +136,8 @@ std::optional<RSDKModel> load_model(std::ifstream& file)
 		for (RSDKTexCoord& tex_coord : model.tex_coords)
 		{
 			static_assert(sizeof(float) == sizeof(uint32_t));
-			tex_coord.x = read_t<float>(file);
-			tex_coord.y = read_t<float>(file);
+			tex_coord.u = read_t<float>(file);
+			tex_coord.v = read_t<float>(file);
 		}
 	}
 
@@ -236,12 +232,28 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 	write_t(file, 'L');
 	write_t(file, '\0');
 
-	write_t(file, model.flags);
+	uint8_t flags = model.flags;
+
+	if (!model.strip_lengths.empty())
+	{
+		flags |= RSDKModelFlags::is_stripped;
+	}
+
+	write_t(file, flags);
 	write_t(file, model.face_vertex_count);
 	write_t(file, model.vertices_per_frame);
 	write_t(file, model.frame_count);
 
-	if (model.flags & RSDKModelFlags::use_colors)
+	if (flags & RSDKModelFlags::use_textures)
+	{
+		for (const RSDKTexCoord& tex_coord : model.tex_coords)
+		{
+			write_t(file, tex_coord.u);
+			write_t(file, tex_coord.v);
+		}
+	}
+
+	if (flags & RSDKModelFlags::use_colors)
 	{
 		for (const RSDKColor& color : model.colors)
 		{
@@ -249,11 +261,37 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 		}
 	}
 
-	write_t(file, static_cast<uint16_t>(model.indices.size()));
-
-	for (uint16_t index : model.indices)
+	if (flags & RSDKModelFlags::is_stripped)
 	{
-		write_t(file, index);
+		// stripCount
+		write_t(file, static_cast<uint16_t>(model.strip_lengths.size()));
+
+		// looseTriCount
+		write_t(file, static_cast<uint16_t>(model.loose_tri_indices.size() / 3));
+
+		for (uint16_t strip_length : model.strip_lengths)
+		{
+			write_t(file, strip_length);
+		}
+
+		for (uint16_t strip_index : model.strip_indices)
+		{
+			write_t(file, strip_index);
+		}
+
+		for (uint16_t loose_tri_index : model.loose_tri_indices)
+		{
+			write_t(file, loose_tri_index);
+		}
+	}
+	else
+	{
+		write_t(file, static_cast<uint16_t>(model.indices.size()));
+
+		for (uint16_t index : model.indices)
+		{
+			write_t(file, index);
+		}
 	}
 
 	for (const RSDKModelVertex& vertex : model.vertices)
@@ -262,7 +300,7 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 		write_t(file, vertex.y);
 		write_t(file, vertex.z);
 
-		if (model.flags & RSDKModelFlags::use_normals)
+		if (flags & RSDKModelFlags::use_normals)
 		{
 			write_t(file, vertex.nx);
 			write_t(file, vertex.ny);
@@ -297,7 +335,17 @@ void get_verts_for_optimizer(const RSDKModel& model, size_t frame_number, std::s
 	for (size_t i = 0; i < model.vertices_per_frame; ++i)
 	{
 		const RSDKModelVertex& old_vert = in_verts[i];
+		RSDKTexCoord tex_coord;
 		RSDKColor color;
+
+		if (model.flags & RSDKModelFlags::use_textures)
+		{
+			tex_coord = model.tex_coords[i];
+		}
+		else
+		{
+			tex_coord = { 0.0f, 0.0f };
+		}
 
 		if ((model.flags & RSDKModelFlags::use_colors))
 		{
@@ -305,18 +353,26 @@ void get_verts_for_optimizer(const RSDKModel& model, size_t frame_number, std::s
 		}
 		else
 		{
-			color = {};
+			color.color = 0;
 		}
 
 		// meshoptmizer suggests memsetting the structure in case there's gaps
 		// because it does byte-wise comparisons.
 		VertexForOptimizer new_vert;
 		memset(&new_vert, 0, sizeof(VertexForOptimizer));
-		new_vert.vertex = old_vert;
-		new_vert.color[0] = static_cast<float>(color.bytes[0]) / 255.0f;
-		new_vert.color[1] = static_cast<float>(color.bytes[1]) / 255.0f;
-		new_vert.color[2] = static_cast<float>(color.bytes[2]) / 255.0f;
-		new_vert.color[3] = static_cast<float>(color.bytes[3]) / 255.0f;
+
+		new_vert.x = old_vert.x;
+		new_vert.y = old_vert.y;
+		new_vert.z = old_vert.z;
+		new_vert.nx = old_vert.nx;
+		new_vert.ny = old_vert.ny;
+		new_vert.nz = old_vert.nz;
+		new_vert.u = tex_coord.u;
+		new_vert.v = tex_coord.v;
+		new_vert.cx = static_cast<float>(color.bytes[0]) / 255.0f;
+		new_vert.cy = static_cast<float>(color.bytes[1]) / 255.0f;
+		new_vert.cz = static_cast<float>(color.bytes[2]) / 255.0f;
+		new_vert.cw = static_cast<float>(color.bytes[3]) / 255.0f;
 
 		out_verts[i] = new_vert;
 	}
@@ -493,6 +549,9 @@ int main(int argc, char** argv)
 
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
 	std::vector<uint16_t> indices;
+	std::vector<uint16_t> kos_strip_lengths;
+	std::vector<uint16_t> kos_strip_indices;
+	std::vector<uint16_t> kos_loose_tri_indices;
 
 	for (size_t f = 0; f < model.frame_count; ++f)
 	{
@@ -532,22 +591,27 @@ int main(int argc, char** argv)
 		std::vector<uint16_t> lod_indices(indices.size());
 		float lod_error = 0.0f; // <- reported back from simplify func
 
-		// normal x, y, z, followed by color.
 		// these weights might need adjusting...
-		std::array<float, 7> attribute_weights = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+		constexpr std::array<float, 9> attribute_weights =
+		{
+			// normal x, y, z
+			1.0f, 1.0f, 1.0f,
+			// u, v
+			1.0f, 1.0f,
+			// color x, y, z, w
+			1.0f, 1.0f, 1.0f, 1.0f
+		};
 
 		const std::span frame_vertices(&vertices[0], new_vertex_count);
 
-		// if necessary, texture coordinates could be included; they just need to be immediately
-		// adjacent to the float colors.
 		const size_t new_index_count =
 			meshopt_simplifyWithAttributes(lod_indices.data(),
 			                               indices.data(),
 			                               indices.size(),
-			                               &frame_vertices[0].vertex.x,
+			                               &frame_vertices[0].x,
 			                               frame_vertices.size(),
 			                               sizeof(VertexForOptimizer),
-			                               &frame_vertices[0].vertex.nx,
+			                               &frame_vertices[0].nx,
 			                               sizeof(VertexForOptimizer),
 			                               attribute_weights.data(),
 			                               attribute_weights.size(),
@@ -603,28 +667,58 @@ int main(int argc, char** argv)
 		size_t strip_length = 0;
 		size_t longest_strip = 0;
 
+		// TODO: IMPORTANT!!! LIMIT TO 256 INDICES TO MATCH RSDK DRAW FUNC
+
+		auto consume_strip = [&]()
+		{
+			++total_strips;
+			longest_strip = std::max(longest_strip, strip_length);
+
+			if (strip_length > 3)
+			{
+				kos_strip_lengths.push_back(static_cast<uint16_t>(strip_length));
+				++total_actual_strips;
+			}
+			else if (strip_length == 3)
+			{
+				kos_loose_tri_indices.insert(kos_loose_tri_indices.end(),
+				                              kos_strip_indices.end() - 3,
+				                              kos_strip_indices.end());
+
+				kos_strip_indices.resize(kos_strip_indices.size() - 3);
+
+				++total_loose_tris;
+			}
+			else
+			{
+				throw std::runtime_error("invalid strip length generated!");
+			}
+
+			strip_length = 0;
+		};
+
 		for (uint16_t index : strip_indices)
 		{
 			if (index != 0xFFFF)
 			{
+				kos_strip_indices.push_back(index);
 				++strip_length;
 				continue;
 			}
 
-			++total_strips;
-
-			if (strip_length > 3)
-			{
-				++total_actual_strips;
-			}
-			else
-			{
-				++total_loose_tris;
-			}
-
-			longest_strip = std::max(longest_strip, strip_length);
-			strip_length = 0;
+			consume_strip();
 		}
+
+		// restart indices are only placed between strips, so the end of the
+		// index array doesn't have one.
+		if (strip_length)
+		{
+			consume_strip();
+		}
+
+		kos_strip_lengths.shrink_to_fit();
+		kos_strip_indices.shrink_to_fit();
+		kos_loose_tri_indices.shrink_to_fit();
 
 		std::cout
 			<< std::format("strip stats:\n"
@@ -641,8 +735,6 @@ int main(int argc, char** argv)
 			               strip_indices.size() - total_strips,
 			               indices.size())
 			<< std::endl;
-
-		// TODO: write strips to file
 	}
 
 	{
@@ -650,7 +742,11 @@ int main(int argc, char** argv)
 		const size_t vertex_delta = model.vertices.size() - vertices.size();
 		const size_t index_delta = model.indices.size() - indices.size();
 
-		if (!vert_frame_delta && !vertex_delta && !index_delta)
+		if (!vert_frame_delta &&
+			!vertex_delta &&
+			!index_delta &&
+			kos_strip_lengths.empty() &&
+			kos_strip_indices.empty())
 		{
 			std::cout << "no changes were made; not writing new file." << std::endl;
 			return 0;
@@ -678,8 +774,16 @@ int main(int argc, char** argv)
 	new_model.frame_count = model.frame_count;
 	new_model.vertices.resize(vertices.size());
 	new_model.indices = std::move(indices);
+	// the presence of this member ensures inclusion of the "stripped" flag on write
+	new_model.strip_lengths = std::move(kos_strip_lengths);
+	new_model.strip_indices = std::move(kos_strip_indices);
+	new_model.loose_tri_indices = std::move(kos_loose_tri_indices);
 
-	// TODO: texture coordinates? currently ignored
+	if (new_model.flags & RSDKModelFlags::use_textures)
+	{
+		new_model.tex_coords.resize(new_vertex_count);
+	}
+
 	if (new_model.flags & RSDKModelFlags::use_colors)
 	{
 		new_model.colors.resize(new_vertex_count);
@@ -688,20 +792,37 @@ int main(int argc, char** argv)
 	for (size_t i = 0; i < vertices.size(); ++i)
 	{
 		const VertexForOptimizer& old_vert = vertices[i];
-		new_model.vertices[i] = old_vert.vertex;
+		RSDKModelVertex& new_vert = new_model.vertices[i];
+
+		new_vert.x = old_vert.x;
+		new_vert.y = old_vert.y;
+		new_vert.z = old_vert.z;
+		new_vert.nx = old_vert.nx;
+		new_vert.ny = old_vert.ny;
+		new_vert.nz = old_vert.nz;
 	}
 
-	if (new_model.flags & RSDKModelFlags::use_colors)
+	if (new_model.flags & (RSDKModelFlags::use_textures | RSDKModelFlags::use_colors))
 	{
 		for (size_t i = 0; i < new_vertex_count; ++i)
 		{
 			const VertexForOptimizer& old_vert = vertices[i];
 
-			auto& new_color = new_model.colors[i];
-
-			for (size_t c = 0; c < old_vert.color.size(); ++c)
+			if (new_model.flags & RSDKModelFlags::use_textures)
 			{
-				new_color.bytes[c] = static_cast<uint8_t>(old_vert.color[c] * 255.0f);
+				RSDKTexCoord& tex_coord = new_model.tex_coords[i];
+				tex_coord.u = old_vert.u;
+				tex_coord.v = old_vert.v;
+			}
+
+			if (new_model.flags & RSDKModelFlags::use_colors)
+			{
+				RSDKColor& new_color = new_model.colors[i];
+
+				new_color.bytes[0] = static_cast<uint8_t>(old_vert.cx * 255.0f);
+				new_color.bytes[1] = static_cast<uint8_t>(old_vert.cy * 255.0f);
+				new_color.bytes[2] = static_cast<uint8_t>(old_vert.cz * 255.0f);
+				new_color.bytes[3] = static_cast<uint8_t>(old_vert.cw * 255.0f);
 			}
 		}
 	}
