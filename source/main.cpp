@@ -545,6 +545,13 @@ int main(int argc, char** argv)
 		               (model.indices.size() / model.face_vertex_count))
 		<< std::endl;
 
+	// TODO: proper quad support (currently causes crash in remapping stage)
+	if (model.face_vertex_count != 3)
+	{
+		std::cerr << "unsupported vertex-per-face count: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl;
+		return -1;
+	}
+
 	std::cout << "optimizing..." << std::endl << std::endl;
 
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
@@ -831,6 +838,8 @@ int main(int argc, char** argv)
 	{
 		return -1;
 	}
+
+	std::cout << "done!" << std::endl;
 
 	return 0;
 }
