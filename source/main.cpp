@@ -1,9 +1,9 @@
-#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -49,7 +49,7 @@ struct RSDKModel
 {
 	uint8_t flags;
 	uint8_t face_vertex_count; // verts per face
-	uint16_t vertex_count; // important, because this is number of verts per frame :/
+	uint16_t vertices_per_frame; // important, because this is number of verts per frame :/
 	uint16_t frame_count;
 
 	std::vector<RSDKModelVertex> vertices;
@@ -72,12 +72,6 @@ struct VertexForOptimizer
 	std::array<float, 4> color;
 };
 
-[[nodiscard]] bool equals_case_insensitive(const std::string_view& a, const std::string_view& b)
-{
-	auto fn = [](unsigned char ca, unsigned char cb) { return std::tolower(ca) == std::tolower(cb); };
-	return std::ranges::equal(a, b, fn);
-}
-
 [[nodiscard]] std::span<uint8_t> read(std::ifstream& file, std::span<uint8_t> buffer)
 {
 	const auto begin = file.tellg();
@@ -92,18 +86,18 @@ template <typename T>
 [[nodiscard]] T read_t(std::ifstream& file)
 {
 	T result;
-	const size_t num_bytes_read = read(file, std::span(reinterpret_cast<uint8_t*>(&result), sizeof(T))).size_bytes();
+	const std::span buffer(reinterpret_cast<uint8_t*>(&result), sizeof(T));
+	const size_t num_bytes_read = read(file, buffer).size_bytes();
 
 	if (num_bytes_read != sizeof(T))
 	{
-		// WIP
-		throw;
+		throw std::runtime_error("failed to read sufficient number of bytes for given type");
 	}
 
 	return result;
 }
 
-RSDKModel load_model(std::ifstream& file)
+std::optional<RSDKModel> load_model(std::ifstream& file)
 {
 	RSDKModel model {};
 
@@ -114,20 +108,33 @@ RSDKModel load_model(std::ifstream& file)
 	if (bytes_read.size_bytes() < fourcc.size() || memcmp(fourcc.data(), "MDL\0", fourcc.size()) != 0)
 	{
 		std::cerr << "not a valid RSDK model" << std::endl;
-		return model;
+		return std::nullopt;
 	}
 
 	model.flags = read_t<uint8_t>(file);
-	model.face_vertex_count = read_t<uint8_t>(file);
-
-	model.vertex_count = read_t<uint16_t>(file);
-	model.frame_count = read_t<uint16_t>(file);
-
-	model.vertices.resize(model.vertex_count * model.frame_count);
 
 	if (model.flags & RSDKModelFlags::use_textures)
 	{
-		model.tex_coords.resize(model.vertex_count);
+		std::cerr << "textured models not currently supported" << std::endl;
+		return std::nullopt;
+	}
+
+	if (model.flags & (RSDKModelFlags::is_stripped | RSDKModelFlags::is_baked))
+	{
+		std::cerr << "model is already optimized" << std::endl;
+		return std::nullopt;
+	}
+
+	model.face_vertex_count = read_t<uint8_t>(file);
+
+	model.vertices_per_frame = read_t<uint16_t>(file);
+	model.frame_count = read_t<uint16_t>(file);
+
+	model.vertices.resize(model.vertices_per_frame * model.frame_count);
+
+	if (model.flags & RSDKModelFlags::use_textures)
+	{
+		model.tex_coords.resize(model.vertices_per_frame);
 
 		for (RSDKTexCoord& tex_coord : model.tex_coords)
 		{
@@ -139,7 +146,7 @@ RSDKModel load_model(std::ifstream& file)
 
 	if (model.flags & RSDKModelFlags::use_colors)
 	{
-		model.colors.resize(model.vertex_count);
+		model.colors.resize(model.vertices_per_frame);
 
 		for (RSDKColor& color : model.colors)
 		{
@@ -159,9 +166,9 @@ RSDKModel load_model(std::ifstream& file)
 
 	for (uint16_t f = 0; f < model.frame_count; ++f)
 	{
-		for (uint16_t v = 0; v < model.vertex_count; ++v)
+		for (uint16_t v = 0; v < model.vertices_per_frame; ++v)
 		{
-			const size_t i = (static_cast<size_t>(f) * model.vertex_count) + v;
+			const size_t i = (static_cast<size_t>(f) * model.vertices_per_frame) + v;
 
 			RSDKModelVertex& vertex = model.vertices[i];
 
@@ -187,60 +194,108 @@ RSDKModel load_model(std::ifstream& file)
 	return model;
 }
 
-int main(int argc, char** argv)
+std::optional<RSDKModel> load_model(const std::string& path)
 {
-	std::string input_path;
+	std::ifstream input_file(path, std::ios::binary);
 
-	for (int i = 1; i < argc; ++i)
+	if (!input_file.is_open())
 	{
-		const std::string_view arg(argv[i]);
+		std::cerr << "failed to open file: " << path << std::endl;
+		return std::nullopt;
+	}
 
-		if (arg == "-i" || arg == "--input")
+	return load_model(input_file);
+}
+
+size_t write(std::ofstream& file, std::span<const uint8_t> buffer)
+{
+	const auto begin = file.tellp();
+	file.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+	const auto end = file.tellp();
+
+	return static_cast<size_t>(end - begin);
+}
+
+template <typename T>
+void write_t(std::ofstream& file, const T& data)
+{
+	const std::span buffer(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
+	const size_t num_bytes_written = write(file, buffer);
+
+	if (num_bytes_written != sizeof(T))
+	{
+		throw std::runtime_error("failed to write sufficient number of bytes for given type");
+	}
+}
+
+void write_model(std::ofstream& file, const RSDKModel& model)
+{
+	write_t(file, 'M');
+	write_t(file, 'D');
+	write_t(file, 'L');
+	write_t(file, '\0');
+
+	write_t(file, model.flags);
+	write_t(file, model.face_vertex_count);
+	write_t(file, model.vertices_per_frame);
+	write_t(file, model.frame_count);
+
+	if (model.flags & RSDKModelFlags::use_colors)
+	{
+		for (const RSDKColor& color : model.colors)
 		{
-			if (i + 1 == argc)
-			{
-				break;
-			}
-
-			input_path = argv[++i];
-			continue;
+			write_t(file, color.color);
 		}
 	}
 
-	if (input_path.empty())
+	write_t(file, static_cast<uint16_t>(model.indices.size()));
+
+	for (uint16_t index : model.indices)
 	{
-		std::cerr << "no input file specified. use -i or --input" << std::endl;
-		return -1;
+		write_t(file, index);
 	}
 
-	std::ifstream file(input_path, std::ios::binary);
-
-	if (!file.is_open())
+	for (const RSDKModelVertex& vertex : model.vertices)
 	{
-		std::cerr << "failed to open file: " << input_path << std::endl;
-		return -2;
+		write_t(file, vertex.x);
+		write_t(file, vertex.y);
+		write_t(file, vertex.z);
+
+		if (model.flags & RSDKModelFlags::use_normals)
+		{
+			write_t(file, vertex.nx);
+			write_t(file, vertex.ny);
+			write_t(file, vertex.nz);
+		}
+	}
+}
+
+bool write_model(const std::string& path, const RSDKModel& model)
+{
+	std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+
+	if (!output_file.is_open())
+	{
+		std::cerr << "failed write file: " << path << std::endl;
+		return false;
 	}
 
-	std::cout << "checking file: " << input_path << std::endl << std::endl;
+	write_model(output_file, model);
+	return true;
+}
 
-	RSDKModel model = load_model(file);
-
-	std::cout
-		<< " verts per face: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl
-		<< "verts per frame: " << model.vertex_count << std::endl
-		<< "    frame count: " << model.frame_count << std::endl
-		<< "    total verts: " << model.vertices.size() << std::endl
-		<< " indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl
-		<< std::endl;
-
-	std::vector<VertexForOptimizer> vertices(model.vertex_count);
-	std::vector<uint16_t> indices;
-
-	// copy the first frame of vertices into a contiguous structure so that
-	// meshoptimizer is aware of all components for remapping.
-	for (size_t i = 0; i < vertices.size(); ++i)
+void get_verts_for_optimizer(const RSDKModel& model, size_t frame_number, std::span<VertexForOptimizer> out_verts)
+{
+	if (out_verts.size() < model.vertices_per_frame)
 	{
-		const auto& old_vert = model.vertices[i];
+		throw std::runtime_error("output buffer is too small for vertices");
+	}
+
+	const std::span in_verts(&model.vertices[model.vertices_per_frame * frame_number], model.vertices_per_frame);
+
+	for (size_t i = 0; i < model.vertices_per_frame; ++i)
+	{
+		const RSDKModelVertex& old_vert = in_verts[i];
 		RSDKColor color;
 
 		if ((model.flags & RSDKModelFlags::use_colors))
@@ -262,36 +317,153 @@ int main(int argc, char** argv)
 		new_vert.color[2] = static_cast<float>(color.bytes[2]) / 255.0f;
 		new_vert.color[3] = static_cast<float>(color.bytes[3]) / 255.0f;
 
-		vertices[i] = new_vert;
+		out_verts[i] = new_vert;
+	}
+}
+
+struct RemapInfo
+{
+	size_t new_vertex_count;
+	std::vector<uint32_t> remap_indices;
+};
+
+[[nodiscard]] RemapInfo get_remap_info(std::span<const uint16_t> indices, std::span<const VertexForOptimizer> vertices)
+{
+	RemapInfo result {};
+	result.remap_indices.resize(indices.size());
+
+	result.new_vertex_count =
+		meshopt_generateVertexRemap(result.remap_indices.data(),
+		                            indices.data(),
+		                            indices.size(),
+		                            vertices.data(),
+		                            vertices.size(),
+		                            sizeof(VertexForOptimizer));
+
+	return result;
+}
+
+void remap_vertices(const RemapInfo& remap_info, std::span<const VertexForOptimizer> in_verts, std::span<VertexForOptimizer> out_verts)
+{
+	if (out_verts.size() < remap_info.new_vertex_count)
+	{
+		throw std::runtime_error("output buffer is too small for vertices");
 	}
 
+	meshopt_remapVertexBuffer(out_verts.data(),
+	                          in_verts.data(),
+	                          in_verts.size(),
+	                          sizeof(VertexForOptimizer),
+	                          remap_info.remap_indices.data());
+}
+
+void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_indices, std::span<uint16_t> out_indices)
+{
+	if (out_indices.size() < in_indices.size())
 	{
-		std::vector<uint32_t> remap_indices(model.indices.size());
+		throw std::runtime_error("output buffer is too small for indices");
+	}
 
-		const size_t remapped_vert_count =
-			meshopt_generateVertexRemap(remap_indices.data(),
-			                            model.indices.data(),
-			                            model.indices.size(),
-			                            vertices.data(),
-			                            vertices.size(),
-			                            sizeof(VertexForOptimizer));
+	meshopt_remapIndexBuffer(out_indices.data(),
+	                         in_indices.data(),
+	                         in_indices.size(),
+	                         remap_info.remap_indices.data());
+}
 
-		std::vector<uint16_t> new_indices(model.indices.size());
-		std::vector<VertexForOptimizer> new_vertices(remapped_vert_count);
+int main(int argc, char** argv)
+{
+	std::string input_path;
+	std::string output_path;
 
-		meshopt_remapIndexBuffer(new_indices.data(),
-		                         model.indices.data(),
-		                         model.indices.size(),
-		                         remap_indices.data());
+	for (int i = 1; i < argc; ++i)
+	{
+		const std::string_view arg(argv[i]);
 
-		meshopt_remapVertexBuffer(new_vertices.data(),
-		                          vertices.data(),
-		                          vertices.size(),
-		                          sizeof(VertexForOptimizer),
-		                          remap_indices.data());
+		if (arg == "-i" || arg == "--input")
+		{
+			if (i + 1 == argc)
+			{
+				break;
+			}
 
-		indices = std::move(new_indices);
-		vertices = std::move(new_vertices);
+			input_path = argv[++i];
+			continue;
+		}
+
+		if (arg == "-o" || arg == "--output")
+		{
+			if (i + 1 == argc)
+			{
+				break;
+			}
+
+			output_path = argv[++i];
+			continue;
+		}
+	}
+
+	if (input_path.empty())
+	{
+		std::cerr << "no input file specified. use -i or --input" << std::endl;
+		return -1;
+	}
+
+	if (output_path.empty())
+	{
+		std::cerr << "no output file specified. use -o or --output" << std::endl;
+		return -1;
+	}
+
+	std::cout << "loading file: " << input_path << std::endl << std::endl;
+
+	const std::optional<RSDKModel> model_maybe = load_model(input_path);
+
+	if (!model_maybe.has_value())
+	{
+		return -1;
+	}
+
+	const RSDKModel& model = model_maybe.value();
+
+	std::cout
+		<< " verts per face: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl
+		<< "verts per frame: " << model.vertices_per_frame << std::endl
+		<< "    frame count: " << model.frame_count << std::endl
+		<< "    total verts: " << model.vertices.size() << std::endl
+		<< "indices (faces): " << model.indices.size() << " (" << (model.indices.size() / model.face_vertex_count) << ')' << std::endl
+		<< std::endl;
+
+	std::cout << "optimizing..." << std::endl << std::endl;
+
+	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
+	std::vector<uint16_t> indices;
+
+	for (size_t f = 0; f < model.frame_count; ++f)
+	{
+		std::span out_frame_verts(&vertices[model.vertices_per_frame * f], model.vertices_per_frame);
+		get_verts_for_optimizer(model, f, out_frame_verts);
+	}
+
+	size_t new_vertex_count;
+
+	{
+		const RemapInfo remap_info = get_remap_info(model.indices, std::span(vertices.data(), model.vertices_per_frame));
+
+		indices.resize(model.indices.size());
+		remap_indices(remap_info, model.indices, indices);
+
+		std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
+
+		for (size_t f = 0; f < model.frame_count; ++f)
+		{
+			const std::span in_verts(&vertices[model.vertices_per_frame * f], model.vertices_per_frame);
+			const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
+
+			remap_vertices(remap_info, in_verts, out_verts);
+		}
+
+		vertices = std::move(new_verts);
+		new_vertex_count = remap_info.new_vertex_count;
 	}
 
 	{
@@ -305,16 +477,19 @@ int main(int argc, char** argv)
 
 		decltype(VertexForOptimizer::color) attribute_weights = { 1.0f, 1.0f, 1.0f, 1.0f };
 
+		const std::span frame_vertices(&vertices[0], new_vertex_count);
+
 		// if necessary, texture coordinates could be included; they just need to be immediately
 		// adjacent to the float colors.
+		// TODO: include normals as attributes
 		const size_t new_index_count =
 			meshopt_simplifyWithAttributes(lod_indices.data(),
 			                               indices.data(),
 			                               indices.size(),
-			                               &vertices[0].vertex.x,
-			                               vertices.size(),
+			                               &frame_vertices[0].vertex.x,
+			                               frame_vertices.size(),
 			                               sizeof(VertexForOptimizer),
-			                               vertices[0].color.data(),
+			                               frame_vertices[0].color.data(),
 			                               sizeof(VertexForOptimizer),
 			                               attribute_weights.data(),
 			                               attribute_weights.size(),
@@ -324,20 +499,101 @@ int main(int argc, char** argv)
 			                               /* options */ 0,
 			                               &lod_error);
 
-		const size_t delta = indices.size() - new_index_count;
-
-		std::cout
-			<< "index count change: " << indices.size() << " -> " << new_index_count
-			<< " (" << delta << ')' << std::endl
-			<< " face count change: " << indices.size() / model.face_vertex_count << " -> " << new_index_count / model.face_vertex_count
-			<< " (" << delta / model.face_vertex_count << ')' << std::endl
-			<< std::endl;
+		std::cout << "error rate: " << lod_error << std::endl;
 
 		lod_indices.resize(new_index_count);
 		lod_indices.shrink_to_fit();
+
+		indices = std::move(lod_indices);
 	}
 
-	// TODO: output to file
+	{
+		const RemapInfo remap_info = get_remap_info(indices, std::span(vertices.data(), new_vertex_count));
+
+		{
+			std::vector<uint16_t> temp_indices(indices.size());
+			remap_indices(remap_info, indices, temp_indices);
+			indices = std::move(temp_indices);
+		}
+
+		std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
+
+		for (size_t f = 0; f < model.frame_count; ++f)
+		{
+			const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
+			const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
+
+			remap_vertices(remap_info, in_verts, out_verts);
+		}
+
+		vertices = std::move(new_verts);
+		new_vertex_count = remap_info.new_vertex_count;
+	}
+
+	{
+		const size_t vert_frame_delta = static_cast<size_t>(model.vertices_per_frame) - new_vertex_count;
+		const size_t vertex_delta = model.vertices.size() - vertices.size();
+		const size_t index_delta = model.indices.size() - indices.size();
+
+		if (!vert_frame_delta && !vertex_delta && !index_delta)
+		{
+			std::cout << "no changes were made; not writing new file." << std::endl;
+			return 0;
+		}
+
+		std::cout
+			<< "verts per frame change: " << model.vertices_per_frame << " -> " << new_vertex_count
+			<< " (-" << vert_frame_delta << ')' << std::endl
+			<< "           total verts: " << model.vertices.size() << " -> " << vertices.size()
+			<< " (-" << vertex_delta << ')' << std::endl
+			<< "    index count change: " << model.indices.size() << " -> " << indices.size()
+			<< " (-" << index_delta << ')' << std::endl
+			<< "     face count change: " << model.indices.size() / model.face_vertex_count << " -> " << indices.size() / model.face_vertex_count
+			<< " (-" << index_delta / model.face_vertex_count << ')' << std::endl
+			<< std::endl;
+	}
+
+	std::cout << "writing to file: " << output_path << std::endl;
+
+	RSDKModel new_model {};
+	new_model.flags = model.flags;
+	new_model.face_vertex_count = model.face_vertex_count;
+	new_model.vertices_per_frame = static_cast<uint16_t>(new_vertex_count);
+	new_model.frame_count = model.frame_count;
+	new_model.vertices.resize(vertices.size());
+	new_model.indices = std::move(indices);
+
+	// TODO: texture coordinates? currently ignored
+	if (new_model.flags & RSDKModelFlags::use_colors)
+	{
+		new_model.colors.resize(new_vertex_count);
+	}
+
+	for (size_t i = 0; i < vertices.size(); ++i)
+	{
+		const VertexForOptimizer& old_vert = vertices[i];
+		new_model.vertices[i] = old_vert.vertex;
+	}
+
+	if (new_model.flags & RSDKModelFlags::use_colors)
+	{
+		for (size_t i = 0; i < new_vertex_count; ++i)
+		{
+			const VertexForOptimizer& old_vert = vertices[i];
+
+			auto& new_color = new_model.colors[i];
+
+			for (size_t c = 0; c < old_vert.color.size(); ++c)
+			{
+				new_color.bytes[c] = static_cast<uint8_t>(old_vert.color[c] * 255.0f);
+			}
+		}
+	}
+
+	if (!write_model(output_path, new_model))
+	{
+		return -1;
+	}
 
 	return 0;
 }
