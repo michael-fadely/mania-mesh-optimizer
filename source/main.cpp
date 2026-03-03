@@ -543,13 +543,14 @@ int main(int argc, char** argv)
 		}
 
 		std::cout
-			<< "verts per frame change: " << model.vertices_per_frame << " -> " << new_vertex_count
+			<< "optimization stats:" << std::endl
+			<< "\tverts per frame: " << model.vertices_per_frame << " -> " << new_vertex_count
 			<< " (-" << vert_frame_delta << ')' << std::endl
-			<< "           total verts: " << model.vertices.size() << " -> " << vertices.size()
+			<< "\t    total verts: " << model.vertices.size() << " -> " << vertices.size()
 			<< " (-" << vertex_delta << ')' << std::endl
-			<< "    index count change: " << model.indices.size() << " -> " << indices.size()
+			<< "\t    index count: " << model.indices.size() << " -> " << indices.size()
 			<< " (-" << index_delta << ')' << std::endl
-			<< "     face count change: " << model.indices.size() / model.face_vertex_count << " -> " << indices.size() / model.face_vertex_count
+			<< "\t     face count: " << model.indices.size() / model.face_vertex_count << " -> " << indices.size() / model.face_vertex_count
 			<< " (-" << index_delta / model.face_vertex_count << ')' << std::endl
 			<< std::endl;
 	}
