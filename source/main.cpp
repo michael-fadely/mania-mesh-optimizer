@@ -15,17 +15,17 @@ struct RSDKModelFlags
 {
 	enum : uint8_t
 	{
-		none = 0,
-		use_normals = 1 << 0,
+		none         = 0,
+		use_normals  = 1 << 0,
 		use_textures = 1 << 1,
-		use_colors = 1 << 2,
+		use_colors   = 1 << 2,
 
 		//
 		// KOS-specific extensions below
 		//
 
 		is_stripped = 1 << 3,
-		is_baked = 1 << 4,
+		is_baked    = 1 << 4,
 	};
 };
 
@@ -689,8 +689,8 @@ int main(int argc, char** argv)
 			else if (strip_length == 3)
 			{
 				kos_loose_tri_indices.insert(kos_loose_tri_indices.end(),
-				                              kos_strip_indices.end() - 3,
-				                              kos_strip_indices.end());
+				                             kos_strip_indices.end() - 3,
+				                             kos_strip_indices.end());
 
 				kos_strip_indices.resize(kos_strip_indices.size() - 3);
 
@@ -750,10 +750,10 @@ int main(int argc, char** argv)
 		const size_t index_delta = model.indices.size() - indices.size();
 
 		if (!vert_frame_delta &&
-			!vertex_delta &&
-			!index_delta &&
-			kos_strip_lengths.empty() &&
-			kos_strip_indices.empty())
+		    !vertex_delta &&
+		    !index_delta &&
+		    kos_strip_lengths.empty() &&
+		    kos_strip_indices.empty())
 		{
 			std::cout << "no changes were made; not writing new file." << std::endl;
 			return 0;
