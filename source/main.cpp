@@ -13,6 +13,54 @@
 
 #include <meshoptimizer.h>
 
+struct Vector3
+{
+	float x, y, z;
+
+	[[nodiscard]] float sqr_magnitude() const
+	{
+		return (x * x) + (y * y) + (z * z);
+	}
+
+	[[nodiscard]] float magnitude() const
+	{
+		return std::sqrt(sqr_magnitude());
+	}
+
+	[[nodiscard]] Vector3 normalized() const
+	{
+		const float mag = magnitude();
+
+		if (mag >= std::numeric_limits<float>::epsilon())
+		{
+			return { x / mag, y / mag, z / mag };
+		}
+
+		return { 0.0f, 0.0f, 0.0f };
+	}
+
+	Vector3& operator+=(const Vector3& rhs)
+	{
+		x += rhs.x;
+		y += rhs.y;
+		z += rhs.z;
+		return *this;
+	}
+
+	Vector3& operator/=(float rhs)
+	{
+		x /= rhs;
+		y /= rhs;
+		z /= rhs;
+		return *this;
+	}
+};
+
+struct Vector4
+{
+	float x, y, z, w;
+};
+
 struct RSDKModelFlags
 {
 	enum : uint8_t
@@ -33,8 +81,8 @@ struct RSDKModelFlags
 
 struct RSDKModelVertex
 {
-	float x, y, z;
-	float nx, ny, nz;
+	Vector3 position;
+	Vector3 normal;
 };
 
 struct RSDKTexCoord
@@ -45,7 +93,7 @@ struct RSDKTexCoord
 union RSDKColor
 {
 	uint8_t bytes[sizeof(uint32_t)];
-	uint32_t color;
+	uint32_t u32;
 
 	struct
 	{
@@ -79,11 +127,16 @@ struct RSDKModel
 
 struct VertexForOptimizer
 {
-	float x, y, z; // position
-	float nx, ny, nz; // normal
-	float u, v; // uv (texture) coordinates
-	float cx, cy, cz, cw; // color. don't care which channels are which.
+	Vector3 position;
+	Vector3 normal;
+	RSDKTexCoord tex_coord;
+	Vector4 color; // don't care which channels are which
 };
+
+[[nodiscard]] float dot(const Vector3& lhs, const Vector3& rhs)
+{
+	return (lhs.x * rhs.x) + (lhs.y * rhs.y) + (lhs.z * rhs.z);
+}
 
 [[nodiscard]] std::span<uint8_t> read(std::ifstream& file, std::span<uint8_t> buffer)
 {
@@ -157,7 +210,7 @@ std::optional<RSDKModel> load_model(std::ifstream& file)
 
 		for (RSDKColor& color : model.colors)
 		{
-			color.color = read_t<uint32_t>(file);
+			color.u32 = read_t<uint32_t>(file);
 		}
 	}
 
@@ -179,21 +232,19 @@ std::optional<RSDKModel> load_model(std::ifstream& file)
 
 			RSDKModelVertex& vertex = model.vertices[i];
 
-			vertex.x = read_t<float>(file);
-			vertex.y = read_t<float>(file);
-			vertex.z = read_t<float>(file);
+			vertex.position.x = read_t<float>(file);
+			vertex.position.y = read_t<float>(file);
+			vertex.position.z = read_t<float>(file);
 
 			if (model.flags & RSDKModelFlags::use_normals)
 			{
-				vertex.nx = read_t<float>(file);
-				vertex.ny = read_t<float>(file);
-				vertex.nz = read_t<float>(file);
+				vertex.normal.x = read_t<float>(file);
+				vertex.normal.y = read_t<float>(file);
+				vertex.normal.z = read_t<float>(file);
 			}
 			else
 			{
-				vertex.nx = 0.0f;
-				vertex.ny = 0.0f;
-				vertex.nz = 0.0f;
+				vertex.normal = { 0.0f, 0.0f, 0.0f };
 			}
 		}
 	}
@@ -267,7 +318,7 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 	{
 		for (const RSDKColor& color : model.colors)
 		{
-			write_t(file, color.color);
+			write_t(file, color.u32);
 		}
 	}
 
@@ -306,15 +357,15 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 
 	for (const RSDKModelVertex& vertex : model.vertices)
 	{
-		write_t(file, vertex.x);
-		write_t(file, vertex.y);
-		write_t(file, vertex.z);
+		write_t(file, vertex.position.x);
+		write_t(file, vertex.position.y);
+		write_t(file, vertex.position.z);
 
 		if (flags & RSDKModelFlags::use_normals)
 		{
-			write_t(file, vertex.nx);
-			write_t(file, vertex.ny);
-			write_t(file, vertex.nz);
+			write_t(file, vertex.normal.x);
+			write_t(file, vertex.normal.y);
+			write_t(file, vertex.normal.z);
 		}
 	}
 }
@@ -363,7 +414,7 @@ void get_verts_for_optimizer(const RSDKModel& model, size_t frame_number, std::s
 		}
 		else
 		{
-			color.color = 0;
+			color.u32 = 0;
 		}
 
 		// meshoptmizer suggests memsetting the structure in case there's gaps
@@ -371,18 +422,13 @@ void get_verts_for_optimizer(const RSDKModel& model, size_t frame_number, std::s
 		VertexForOptimizer new_vert;
 		memset(&new_vert, 0, sizeof(VertexForOptimizer));
 
-		new_vert.x = old_vert.x;
-		new_vert.y = old_vert.y;
-		new_vert.z = old_vert.z;
-		new_vert.nx = old_vert.nx;
-		new_vert.ny = old_vert.ny;
-		new_vert.nz = old_vert.nz;
-		new_vert.u = tex_coord.u;
-		new_vert.v = tex_coord.v;
-		new_vert.cx = static_cast<float>(color.bytes[0]) / 255.0f;
-		new_vert.cy = static_cast<float>(color.bytes[1]) / 255.0f;
-		new_vert.cz = static_cast<float>(color.bytes[2]) / 255.0f;
-		new_vert.cw = static_cast<float>(color.bytes[3]) / 255.0f;
+		new_vert.position = old_vert.position;
+		new_vert.normal = old_vert.normal;
+		new_vert.tex_coord = tex_coord;
+		new_vert.color.x = static_cast<float>(color.bytes[0]) / 255.0f;
+		new_vert.color.y = static_cast<float>(color.bytes[1]) / 255.0f;
+		new_vert.color.z = static_cast<float>(color.bytes[2]) / 255.0f;
+		new_vert.color.w = static_cast<float>(color.bytes[3]) / 255.0f;
 
 		out_verts[i] = new_vert;
 	}
@@ -485,54 +531,6 @@ void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_ind
 	return strip_indices;
 }
 
-struct Vector3
-{
-	float x, y, z;
-
-	[[nodiscard]] float sqr_magnitude() const
-	{
-		return (x * x) + (y * y) + (z * z);
-	}
-
-	[[nodiscard]] float magnitude() const
-	{
-		return sqrt(sqr_magnitude());
-	}
-
-	[[nodiscard]] Vector3 normalized() const
-	{
-		const float mag = magnitude();
-
-		if (mag >= std::numeric_limits<float>::epsilon())
-		{
-			return { x / mag, y / mag, z / mag };
-		}
-
-		return { 0.0f, 0.0f, 0.0f };
-	}
-
-	Vector3& operator+=(const Vector3& rhs)
-	{
-		x += rhs.x;
-		y += rhs.y;
-		z += rhs.z;
-		return *this;
-	}
-
-	Vector3& operator/=(float rhs)
-	{
-		x /= rhs;
-		y /= rhs;
-		z /= rhs;
-		return *this;
-	}
-};
-
-[[nodiscard]] float dot(const Vector3& lhs, const Vector3& rhs)
-{
-	return (lhs.x * rhs.x) + (lhs.y * rhs.y) + (lhs.z * rhs.z);
-}
-
 bool bake_lighting(RSDKModel& model,
                    const Vector3& light_direction,
                    float ambient_strength,
@@ -553,7 +551,7 @@ bool bake_lighting(RSDKModel& model,
 	if (!(model.flags & RSDKModelFlags::use_colors))
 	{
 		model.flags |= RSDKModelFlags::use_colors;
-		model.colors.resize(model.vertices_per_frame, { .color = 0xFFFFFFFF });
+		model.colors.resize(model.vertices_per_frame, { .u32 = 0xFFFFFFFF });
 	}
 
 	// average normals across frames since vertex colors are shared between frames.
@@ -565,7 +563,7 @@ bool bake_lighting(RSDKModel& model,
 		{
 			const size_t start = f * static_cast<size_t>(model.vertices_per_frame);
 			const RSDKModelVertex& vertex = model.vertices[start + v];
-			normal_sum += { vertex.nx, vertex.ny, vertex.nz };
+			normal_sum += vertex.normal;
 		}
 
 		normal_sum /= static_cast<float>(model.vertices_per_frame);
@@ -735,10 +733,10 @@ int main(int argc, char** argv)
 			meshopt_simplifyWithAttributes(lod_indices.data(),
 			                               indices.data(),
 			                               indices.size(),
-			                               &frame_vertices[0].x,
+			                               &frame_vertices[0].position.x,
 			                               frame_vertices.size(),
 			                               sizeof(VertexForOptimizer),
-			                               &frame_vertices[0].nx,
+			                               &frame_vertices[0].normal.x,
 			                               sizeof(VertexForOptimizer),
 			                               attribute_weights.data(),
 			                               attribute_weights.size(),
@@ -919,12 +917,8 @@ int main(int argc, char** argv)
 		const VertexForOptimizer& old_vert = vertices[i];
 		RSDKModelVertex& new_vert = new_model.vertices[i];
 
-		new_vert.x = old_vert.x;
-		new_vert.y = old_vert.y;
-		new_vert.z = old_vert.z;
-		new_vert.nx = old_vert.nx;
-		new_vert.ny = old_vert.ny;
-		new_vert.nz = old_vert.nz;
+		new_vert.position = old_vert.position;
+		new_vert.normal = old_vert.normal;
 	}
 
 	if (new_model.flags & (RSDKModelFlags::use_textures | RSDKModelFlags::use_colors))
@@ -936,18 +930,17 @@ int main(int argc, char** argv)
 			if (new_model.flags & RSDKModelFlags::use_textures)
 			{
 				RSDKTexCoord& tex_coord = new_model.tex_coords[i];
-				tex_coord.u = old_vert.u;
-				tex_coord.v = old_vert.v;
+				tex_coord = old_vert.tex_coord;
 			}
 
 			if (new_model.flags & RSDKModelFlags::use_colors)
 			{
 				RSDKColor& new_color = new_model.colors[i];
 
-				new_color.bytes[0] = static_cast<uint8_t>(old_vert.cx * 255.0f);
-				new_color.bytes[1] = static_cast<uint8_t>(old_vert.cy * 255.0f);
-				new_color.bytes[2] = static_cast<uint8_t>(old_vert.cz * 255.0f);
-				new_color.bytes[3] = static_cast<uint8_t>(old_vert.cw * 255.0f);
+				new_color.bytes[0] = static_cast<uint8_t>(old_vert.color.x * 255.0f);
+				new_color.bytes[1] = static_cast<uint8_t>(old_vert.color.y * 255.0f);
+				new_color.bytes[2] = static_cast<uint8_t>(old_vert.color.z * 255.0f);
+				new_color.bytes[3] = static_cast<uint8_t>(old_vert.color.w * 255.0f);
 			}
 		}
 	}
