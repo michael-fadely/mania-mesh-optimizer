@@ -781,64 +781,56 @@ int main(int argc, char** argv)
 	{
 		// seems weird that this operates on a triangle list but whatever...
 		meshopt_optimizeVertexCacheStrip(indices.data(), indices.data(), indices.size(), new_vertex_count);
-	}
 
-	// TODO: if (stripify)
-	{
-		std::vector<uint16_t> strip_indices = stripify(model.face_vertex_count, indices, new_vertex_count);
-		size_t total_strips = 0;
-		size_t total_actual_strips = 0;
-		size_t total_loose_tris = 0;
-		size_t strip_length = 0;
+		// TODO: configurable max strip length
+		static constexpr size_t max_strip_length = 256;
+
+		const std::vector<uint16_t> strip_indices = stripify(model.face_vertex_count, indices, new_vertex_count);
 		size_t longest_strip = 0;
 
-		// TODO: IMPORTANT!!! LIMIT TO 256 INDICES TO MATCH RSDK DRAW FUNC
-
-		auto consume_strip = [&]()
+		for (auto full_strip_begin = strip_indices.begin();
+		     full_strip_begin != strip_indices.end();)
 		{
-			++total_strips;
-			longest_strip = std::max(longest_strip, strip_length);
+			const auto full_strip_end = std::find(full_strip_begin, strip_indices.end(), 0xFFFF);
 
-			if (strip_length > 3)
+			for (auto slice_begin = full_strip_begin; full_strip_begin != full_strip_end;)
 			{
-				kos_strip_lengths.push_back(static_cast<uint16_t>(strip_length));
-				++total_actual_strips;
+				const auto full_distance = std::distance(slice_begin, full_strip_end);
+
+				if (full_distance == 3)
+				{
+					kos_loose_tri_indices.insert(kos_loose_tri_indices.end(), slice_begin, full_strip_end);
+					break;
+				}
+
+				const auto slice_end = std::next(slice_begin, std::min<ptrdiff_t>(max_strip_length, full_distance));
+				const auto slice_distance = std::distance(slice_begin, slice_end);
+
+				if (slice_distance > 3)
+				{
+					longest_strip = std::max(longest_strip, static_cast<size_t>(slice_distance));
+					kos_strip_lengths.push_back(static_cast<uint16_t>(slice_distance));
+					kos_strip_indices.insert(kos_strip_indices.end(), slice_begin, slice_end);
+				}
+				else
+				{
+					throw std::runtime_error("invalid strip length generated!");
+				}
+
+				if (full_distance == slice_distance)
+				{
+					break;
+				}
+
+				slice_begin = std::prev(slice_end, 2);
 			}
-			else if (strip_length == 3)
+
+			if (full_strip_end == strip_indices.end())
 			{
-				kos_loose_tri_indices.insert(kos_loose_tri_indices.end(),
-				                             kos_strip_indices.end() - 3,
-				                             kos_strip_indices.end());
-
-				kos_strip_indices.resize(kos_strip_indices.size() - 3);
-
-				++total_loose_tris;
-			}
-			else
-			{
-				throw std::runtime_error("invalid strip length generated!");
+				break;
 			}
 
-			strip_length = 0;
-		};
-
-		for (uint16_t index : strip_indices)
-		{
-			if (index != 0xFFFF)
-			{
-				kos_strip_indices.push_back(index);
-				++strip_length;
-				continue;
-			}
-
-			consume_strip();
-		}
-
-		// restart indices are only placed between strips, so the end of the
-		// index array doesn't have one.
-		if (strip_length)
-		{
-			consume_strip();
+			full_strip_begin = std::next(full_strip_end);
 		}
 
 		kos_strip_lengths.shrink_to_fit();
@@ -847,17 +839,14 @@ int main(int argc, char** argv)
 
 		std::cout
 			<< std::format("strip stats:\n"
-			               "\t       strips: {}\n"
 			               "\tactual strips: {}\n"
 			               "\t   loose tris: {}\n"
 			               "\tlongest strip: {}\n"
-			               "\tstrip indices: {} (- ends: {}; vs {})\n",
-			               total_strips,
-			               total_actual_strips,
-			               total_loose_tris,
+			               "\tstrip indices: {} (vs {})\n",
+			               kos_strip_lengths.size(),
+			               kos_loose_tri_indices.size() / 3,
 			               longest_strip,
 			               strip_indices.size(),
-			               strip_indices.size() - total_strips,
 			               indices.size())
 			<< std::endl;
 	}
