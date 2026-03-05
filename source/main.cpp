@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -44,6 +45,14 @@ union RSDKColor
 {
 	uint8_t bytes[sizeof(uint32_t)];
 	uint32_t color;
+
+	struct
+	{
+		uint8_t b;
+		uint8_t g;
+		uint8_t r;
+		uint8_t a;
+	};
 };
 
 struct RSDKModel
@@ -475,6 +484,116 @@ void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_ind
 	return strip_indices;
 }
 
+struct Vector3
+{
+	float x, y, z;
+
+	[[nodiscard]] float sqr_magnitude() const
+	{
+		return (x * x) + (y * y) + (z * z);
+	}
+
+	[[nodiscard]] float magnitude() const
+	{
+		return sqrt(sqr_magnitude());
+	}
+
+	[[nodiscard]] Vector3 normalized() const
+	{
+		const float mag = magnitude();
+
+		if (mag >= std::numeric_limits<float>::epsilon())
+		{
+			return { x / mag, y / mag, z / mag };
+		}
+
+		return { 0.0f, 0.0f, 0.0f };
+	}
+
+	Vector3& operator+=(const Vector3& rhs)
+	{
+		x += rhs.x;
+		y += rhs.y;
+		z += rhs.z;
+		return *this;
+	}
+
+	Vector3& operator/=(float rhs)
+	{
+		x /= rhs;
+		y /= rhs;
+		z /= rhs;
+		return *this;
+	}
+};
+
+[[nodiscard]] float dot(const Vector3& lhs, const Vector3& rhs)
+{
+	return (lhs.x * rhs.x) + (lhs.y * rhs.y) + (lhs.z * rhs.z);
+}
+
+bool bake_lighting(RSDKModel& model,
+                   const Vector3& light_direction,
+                   float ambient_strength,
+                   float diffuse_strength,
+                   float specular_strength,
+                   float specular_power)
+{
+	if (!(model.flags & RSDKModelFlags::use_normals))
+	{
+		return false;
+	}
+
+	model.flags |= RSDKModelFlags::is_baked;
+
+	std::vector<Vector3> average_normals;
+	average_normals.reserve(model.vertices_per_frame);
+
+	if (!(model.flags & RSDKModelFlags::use_colors))
+	{
+		model.flags |= RSDKModelFlags::use_colors;
+		model.colors.resize(model.vertices_per_frame, { .color = 0xFFFFFFFF });
+	}
+
+	// average normals across frames since vertex colors are shared between frames.
+	for (size_t v = 0; v < model.vertices_per_frame; ++v)
+	{
+		Vector3 normal_sum = { 0.0f, 0.0f, 0.0f };
+
+		for (size_t f = 0; f < model.frame_count; ++f)
+		{
+			const size_t start = f * static_cast<size_t>(model.vertices_per_frame);
+			const RSDKModelVertex& vertex = model.vertices[start + v];
+			normal_sum += { vertex.nx, vertex.ny, vertex.nz };
+		}
+
+		normal_sum /= static_cast<float>(model.vertices_per_frame);
+		average_normals.push_back(normal_sum.normalized());
+	}
+
+	const Vector3 light_direction_ = light_direction.normalized();
+
+	for (size_t i = 0; i < model.vertices_per_frame; ++i)
+	{
+		const Vector3& average_normal = average_normals[i];
+
+		const float ndotl = dot(average_normal, light_direction_);
+
+		constexpr float wrap = 0.15f;
+		// const float diffuse = std::max(0.0f, ndotl) * diffuse_strength;
+		const float diffuse_wrapped = std::max(0.0f, (ndotl + wrap) / (1.0f + wrap)) * diffuse_strength;
+		const float specular = std::pow(std::max(0.0f, ndotl), specular_power) * specular_strength;
+		const float brightness = ambient_strength + diffuse_wrapped + specular;
+
+		RSDKColor& color = model.colors[i];
+		color.b = static_cast<uint8_t>(std::clamp(static_cast<float>(color.b) * brightness, 0.0f, 255.0f));
+		color.g = static_cast<uint8_t>(std::clamp(static_cast<float>(color.g) * brightness, 0.0f, 255.0f));
+		color.r = static_cast<uint8_t>(std::clamp(static_cast<float>(color.r) * brightness, 0.0f, 255.0f));
+	}
+
+	return true;
+}
+
 int main(int argc, char** argv)
 {
 	std::string input_path;
@@ -772,8 +891,6 @@ int main(int argc, char** argv)
 			<< std::endl;
 	}
 
-	std::cout << "writing to file: " << output_path << std::endl;
-
 	RSDKModel new_model {};
 	new_model.flags = model.flags;
 	new_model.face_vertex_count = model.face_vertex_count;
@@ -833,6 +950,12 @@ int main(int argc, char** argv)
 			}
 		}
 	}
+
+	// TODO: if (bake_lighting)
+	std::cout << "baking lighting..." << std::endl;
+	bake_lighting(new_model, { 0.15f, 0.85f, 0.1f }, 0.5f, 0.7f, 0.7f, 1.5f);
+
+	std::cout << "writing to file: " << output_path << std::endl;
 
 	if (!write_model(output_path, new_model))
 	{
