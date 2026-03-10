@@ -8,6 +8,7 @@
 #include <iostream>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -593,53 +594,49 @@ bool bake_lighting(RSDKModel& model,
 	return true;
 }
 
-int main(int argc, char** argv)
+struct Options
 {
 	std::string input_path;
 	std::string output_path;
 
-	for (int i = 1; i < argc; ++i)
-	{
-		const std::string_view arg(argv[i]);
+	bool optimize = true;
+	bool simplify = true;
+	bool stripify = true;
+	bool bake_lighting = true;
 
-		if (arg == "-i" || arg == "--input")
-		{
-			if (i + 1 == argc)
-			{
-				break;
-			}
+	uint16_t strip_max_points = 256;
 
-			input_path = argv[++i];
-			continue;
-		}
+	float simplify_index_threshold = 0.2f; // 0 for fewest indices possible
+	float simplify_target_error = 0.01f; // <= 1%
 
-		if (arg == "-o" || arg == "--output")
-		{
-			if (i + 1 == argc)
-			{
-				break;
-			}
+	Vector3 bake_light_direction = { 0.15f, 0.85f, 0.1f };
+	float bake_ambient_strength = 0.5f;
+	float bake_diffuse_strength = 0.7f;
+	float bake_specular_strength = 0.7f;
+	float bake_specular_power = 1.5f;
+};
 
-			output_path = argv[++i];
-			continue;
-		}
-	}
+[[nodiscard]] Options parse_args(std::span<char*> args);
 
-	if (input_path.empty())
+int main(int argc, char** argv)
+{
+	const Options options = parse_args(std::span(argv, argc));
+
+	if (options.input_path.empty())
 	{
 		std::cerr << "no input file specified. use -i or --input" << std::endl;
 		return -1;
 	}
 
-	if (output_path.empty())
+	if (options.output_path.empty())
 	{
 		std::cerr << "no output file specified. use -o or --output" << std::endl;
 		return -1;
 	}
 
-	std::cout << "loading file: " << input_path << std::endl << std::endl;
+	std::cout << "loading file: " << options.input_path << std::endl << std::endl;
 
-	const std::optional<RSDKModel> model_maybe = load_model(input_path);
+	const std::optional<RSDKModel> model_maybe = load_model(options.input_path);
 
 	if (!model_maybe.has_value())
 	{
@@ -670,8 +667,6 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
-	std::cout << "optimizing..." << std::endl << std::endl;
-
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
 	std::vector<uint16_t> indices;
 	std::vector<uint16_t> kos_strip_lengths;
@@ -684,9 +679,15 @@ int main(int argc, char** argv)
 		get_verts_for_optimizer(model, f, out_frame_verts);
 	}
 
-	size_t new_vertex_count;
+	auto new_vertex_count = static_cast<size_t>(model.vertices_per_frame);
 
+	// FIXME: opting out of "optimization" (remapping) can result in a crash (details below).
+	// some models have index counts that are not aligned to RSDKModel::face_vertex_count.
+	// remapping tends to fix this!
+	if (options.optimize)
 	{
+		std::cout << "optimizing..." << std::endl;
+
 		const RemapInfo remap_info = get_remap_info(model.indices, std::span(vertices.data(), model.vertices_per_frame));
 
 		indices.resize(model.indices.size());
@@ -706,28 +707,36 @@ int main(int argc, char** argv)
 		new_vertex_count = remap_info.new_vertex_count;
 	}
 
-	// TODO: if (simplify)
+	if (options.simplify)
 	{
-		constexpr float threshold = 0.2f;
-		constexpr float target_error = 0.01f; // docs use 0.01f (1e-2f; <= 1%) error
-
-		const auto target_index_count = static_cast<size_t>(static_cast<float>(indices.size()) * threshold);
+		std::cout << "simplifying..." << std::endl;
 
 		std::vector<uint16_t> lod_indices(indices.size());
-		float lod_error = 0.0f; // <- reported back from simplify func
+		const std::span frame_vertices(&vertices[0], new_vertex_count);
 
 		// these weights might need adjusting...
-		constexpr std::array<float, 9> attribute_weights =
+		// TODO: command-line args to override weights
+		constexpr float k_normal_weight = 1.0f;
+		constexpr float k_uv_weight     = 1.0f;
+		constexpr float k_color_weight  = 1.0f;
+
+		const float normal_weight = (model.flags & RSDKModelFlags::use_normals)  ? k_normal_weight : 0.0f;
+		const float uv_weight     = (model.flags & RSDKModelFlags::use_textures) ? k_uv_weight     : 0.0f;
+		const float color_weight  = (model.flags & RSDKModelFlags::use_colors)   ? k_color_weight  : 0.0f;
+
+		const std::array<float, 9> attribute_weights =
 		{
 			// normal x, y, z
-			1.0f, 1.0f, 1.0f,
+			normal_weight, normal_weight, normal_weight,
 			// u, v
-			1.0f, 1.0f,
+			uv_weight, uv_weight,
 			// color x, y, z, w
-			1.0f, 1.0f, 1.0f, 1.0f
+			color_weight, color_weight, color_weight, color_weight
 		};
 
-		const std::span frame_vertices(&vertices[0], new_vertex_count);
+		const auto target_index_count = static_cast<size_t>(static_cast<float>(indices.size()) * options.simplify_index_threshold);
+
+		float lod_error = 0.0f; // <- reported back from simplify func
 
 		const size_t new_index_count =
 			meshopt_simplifyWithAttributes(lod_indices.data(),
@@ -742,48 +751,47 @@ int main(int argc, char** argv)
 			                               attribute_weights.size(),
 			                               nullptr,
 			                               target_index_count,
-			                               target_error,
+			                               options.simplify_target_error,
 			                               /* options */ 0,
 			                               &lod_error);
-
-		std::cout << "error rate: " << lod_error << std::endl;
 
 		lod_indices.resize(new_index_count);
 		lod_indices.shrink_to_fit();
 
 		indices = std::move(lod_indices);
-	}
 
-	{
-		const RemapInfo remap_info = get_remap_info(indices, std::span(vertices.data(), new_vertex_count));
+		std::cout << "error rate: " << lod_error << std::endl;
 
 		{
-			std::vector<uint16_t> temp_indices(indices.size());
-			remap_indices(remap_info, indices, temp_indices);
-			indices = std::move(temp_indices);
+			const RemapInfo remap_info = get_remap_info(indices, std::span(vertices.data(), new_vertex_count));
+
+			{
+				std::vector<uint16_t> temp_indices(indices.size());
+				remap_indices(remap_info, indices, temp_indices);
+				indices = std::move(temp_indices);
+			}
+
+			std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
+
+			for (size_t f = 0; f < model.frame_count; ++f)
+			{
+				const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
+				const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
+
+				remap_vertices(remap_info, in_verts, out_verts);
+			}
+
+			vertices = std::move(new_verts);
+			new_vertex_count = remap_info.new_vertex_count;
 		}
-
-		std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
-
-		for (size_t f = 0; f < model.frame_count; ++f)
-		{
-			const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
-			const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
-
-			remap_vertices(remap_info, in_verts, out_verts);
-		}
-
-		vertices = std::move(new_verts);
-		new_vertex_count = remap_info.new_vertex_count;
 	}
 
-	// TODO: if (stripify)
+	if (options.stripify)
 	{
+		std::cout << "stripifying..." << std::endl;
+
 		// seems weird that this operates on a triangle list but whatever...
 		meshopt_optimizeVertexCacheStrip(indices.data(), indices.data(), indices.size(), new_vertex_count);
-
-		// TODO: configurable max strip length
-		static constexpr size_t max_strip_length = 256;
 
 		const std::vector<uint16_t> strip_indices = stripify(model.face_vertex_count, indices, new_vertex_count);
 		size_t longest_strip = 0;
@@ -803,7 +811,7 @@ int main(int argc, char** argv)
 					break;
 				}
 
-				const auto slice_end = std::next(slice_begin, std::min<ptrdiff_t>(max_strip_length, full_distance));
+				const auto slice_end = std::next(slice_begin, std::min<ptrdiff_t>(options.strip_max_points, full_distance));
 				const auto slice_distance = std::distance(slice_begin, slice_end);
 
 				if (slice_distance > 3)
@@ -842,15 +850,17 @@ int main(int argc, char** argv)
 			               "\tactual strips: {}\n"
 			               "\t   loose tris: {}\n"
 			               "\tlongest strip: {}\n"
-			               "\tstrip indices: {} (vs {})\n",
+			               "\tstrip indices: {}\n"
+			               "\ttotal indices: {} (vs {})\n",
 			               kos_strip_lengths.size(),
 			               kos_loose_tri_indices.size() / 3,
 			               longest_strip,
 			               strip_indices.size(),
-			               indices.size())
+			               kos_loose_tri_indices.size() + strip_indices.size(), indices.size())
 			<< std::endl;
 	}
 
+	if (!options.bake_lighting)
 	{
 		const size_t vert_frame_delta = static_cast<size_t>(model.vertices_per_frame) - new_vertex_count;
 		const size_t vertex_delta = model.vertices.size() - vertices.size();
@@ -934,13 +944,20 @@ int main(int argc, char** argv)
 		}
 	}
 
-	// TODO: if (bake_lighting)
-	std::cout << "baking lighting..." << std::endl;
-	bake_lighting(new_model, { 0.15f, 0.85f, 0.1f }, 0.5f, 0.7f, 0.7f, 1.5f);
+	if (options.bake_lighting)
+	{
+		std::cout << "baking lighting..." << std::endl;
+		bake_lighting(new_model,
+		              options.bake_light_direction,
+		              options.bake_ambient_strength,
+		              options.bake_diffuse_strength,
+		              options.bake_diffuse_strength,
+		              options.bake_specular_power);
+	}
 
-	std::cout << "writing to file: " << output_path << std::endl;
+	std::cout << "writing to file: " << options.output_path << std::endl;
 
-	if (!write_model(output_path, new_model))
+	if (!write_model(options.output_path, new_model))
 	{
 		return -1;
 	}
@@ -948,4 +965,233 @@ int main(int argc, char** argv)
 	std::cout << "done!" << std::endl;
 
 	return 0;
+}
+
+bool equals_ignore_case(const std::string_view& a, const std::string_view& b)
+{
+	auto fn = [](unsigned char ca, unsigned char cb) { return std::tolower(ca) == std::tolower(cb); };
+	return std::ranges::equal(a, b, fn);
+}
+
+bool is_arg(const std::string_view& str)
+{
+	return (str.length() == 2 && str[0] == '-' && !std::isdigit(str[1])) ||
+	       str.starts_with("--");
+}
+
+bool parse_bool(const std::string_view& arg, bool* value)
+{
+	if (is_arg(arg))
+	{
+		return false;
+	}
+
+	if (arg == "1" ||
+	    equals_ignore_case(arg, "true") ||
+	    equals_ignore_case(arg, "on") ||
+	    equals_ignore_case(arg, "yes"))
+	{
+		*value = true;
+		return true;
+	}
+
+	if (arg == "0" ||
+	    equals_ignore_case(arg, "false") ||
+	    equals_ignore_case(arg, "off") ||
+	    equals_ignore_case(arg, "no"))
+	{
+		*value = false;
+		return true;
+	}
+
+	throw std::runtime_error("invalid value for argument");
+}
+
+bool parse_float(const std::string_view& arg, float* value)
+{
+	if (is_arg(arg))
+	{
+		return false;
+	}
+
+	// note that the input format is dependent on the system locale which might not be desirable
+	// (decimal place char)
+	*value = std::stof(std::string(arg));
+	return true;
+}
+
+bool parse_uint16(const std::string_view& arg, uint16_t* value)
+{
+	if (is_arg(arg))
+	{
+		return false;
+	}
+
+	*value = static_cast<uint16_t>(std::stoul(std::string(arg)));
+	return true;
+}
+
+[[nodiscard]] Options parse_args(std::span<char*> args)
+{
+	Options options;
+
+	for (size_t i = 1; i < args.size(); ++i)
+	{
+		const std::string_view arg(args[i]);
+
+		if (arg == "-i" || arg == "--input")
+		{
+			if (i + 1 < args.size())
+			{
+				options.input_path = args[++i];
+			}
+
+			continue;
+		}
+
+		if (arg == "-o" || arg == "--output")
+		{
+			if (i + 1 < args.size())
+			{
+				options.output_path = args[++i];
+			}
+
+			continue;
+		}
+
+		if (arg == "--optimize")
+		{
+			options.optimize = true;
+
+			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.optimize))
+			{
+				++i;
+			}
+
+			continue;
+		}
+
+		if (arg == "--simplify")
+		{
+			options.simplify = true;
+
+			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.simplify))
+			{
+				++i;
+			}
+
+			continue;
+		}
+
+		if (arg == "--stripify")
+		{
+			options.stripify = true;
+
+			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.stripify))
+			{
+				++i;
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-lighting")
+		{
+			options.bake_lighting = true;
+
+			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.bake_lighting))
+			{
+				++i;
+			}
+
+			continue;
+		}
+
+		if (arg == "--strip-max-points")
+		{
+			if (++i == args.size() || !parse_uint16(args[i], &options.strip_max_points))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			options.strip_max_points = std::max<uint16_t>(options.strip_max_points, 4);
+
+			continue;
+		}
+
+		if (arg == "--simplify-index-threshold")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.simplify_index_threshold))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--simplify-target-error")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.simplify_target_error))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-light-direction")
+		{
+			if (args.size() - i < 4 ||
+			    !parse_float(args[++i], &options.bake_light_direction.x) ||
+			    !parse_float(args[++i], &options.bake_light_direction.y) ||
+			    !parse_float(args[++i], &options.bake_light_direction.z))
+			{
+				throw std::runtime_error("missing values for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-ambient-strength")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.bake_ambient_strength))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-diffuse-strength")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.bake_diffuse_strength))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-specular-strength")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.bake_specular_strength))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+
+		if (arg == "--bake-specular-power")
+		{
+			if (++i == args.size() || !parse_float(args[i], &options.bake_specular_power))
+			{
+				throw std::runtime_error("missing value for argument");
+			}
+
+			continue;
+		}
+	}
+
+	return options;
 }
