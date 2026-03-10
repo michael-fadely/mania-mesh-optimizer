@@ -566,7 +566,7 @@ bool bake_lighting(RSDKModel& model,
 			normal_sum += vertex.normal;
 		}
 
-		normal_sum /= static_cast<float>(model.vertices_per_frame);
+		normal_sum /= static_cast<float>(model.frame_count);
 		average_normals.push_back(normal_sum.normalized());
 	}
 
