@@ -533,7 +533,7 @@ void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_ind
 }
 
 bool bake_lighting(RSDKModel& model,
-                   const Vector3& light_direction,
+                   Vector3 light_direction,
                    float ambient_strength,
                    float diffuse_strength,
                    float specular_strength,
@@ -546,38 +546,29 @@ bool bake_lighting(RSDKModel& model,
 
 	model.flags |= RSDKModelFlags::is_baked;
 
-	std::vector<Vector3> average_normals;
-	average_normals.reserve(model.vertices_per_frame);
-
 	if (!(model.flags & RSDKModelFlags::use_colors))
 	{
 		model.flags |= RSDKModelFlags::use_colors;
 		model.colors.resize(model.vertices_per_frame, { .u32 = 0xFFFFFFFF });
 	}
 
-	// average normals across frames since vertex colors are shared between frames.
-	for (size_t v = 0; v < model.vertices_per_frame; ++v)
-	{
-		Vector3 normal_sum = { 0.0f, 0.0f, 0.0f };
-
-		for (size_t f = 0; f < model.frame_count; ++f)
-		{
-			const size_t start = f * static_cast<size_t>(model.vertices_per_frame);
-			const RSDKModelVertex& vertex = model.vertices[start + v];
-			normal_sum += vertex.normal;
-		}
-
-		normal_sum /= static_cast<float>(model.frame_count);
-		average_normals.push_back(normal_sum.normalized());
-	}
-
-	const Vector3 light_direction_ = light_direction.normalized();
+	light_direction = light_direction.normalized();
 
 	for (size_t i = 0; i < model.vertices_per_frame; ++i)
 	{
-		const Vector3& average_normal = average_normals[i];
+		Vector3 average_normal = { 0.0f, 0.0f, 0.0f };
 
-		const float ndotl = dot(average_normal, light_direction_);
+		// average normals across frames since vertex colors are shared between frames.
+		for (size_t f = 0; f < model.frame_count; ++f)
+		{
+			const size_t start = f * static_cast<size_t>(model.vertices_per_frame);
+			const RSDKModelVertex& vertex = model.vertices[start + i];
+			average_normal += vertex.normal;
+		}
+
+		average_normal /= static_cast<float>(model.frame_count);
+
+		const float ndotl = dot(average_normal, light_direction);
 
 		constexpr float wrap = 0.15f;
 		// const float diffuse = std::max(0.0f, ndotl) * diffuse_strength;
