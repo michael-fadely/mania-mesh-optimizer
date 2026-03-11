@@ -503,27 +503,14 @@ void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_ind
 	return result;
 }
 
-[[nodiscard]] std::vector<uint16_t> stripify(const uint8_t verts_per_face, std::span<const uint16_t> in_indices, size_t vertex_count)
+[[nodiscard]] std::vector<uint16_t> stripify(std::span<const uint16_t> in_indices, size_t vertex_count)
 {
-	std::vector<uint16_t> tri_indices;
-	std::span<const uint16_t> index_view;
-
-	if (verts_per_face == 4)
-	{
-		tri_indices = quad_to_tri_indices(in_indices);
-		index_view = tri_indices;
-	}
-	else
-	{
-		index_view = in_indices;
-	}
-
-	std::vector<uint16_t> strip_indices(meshopt_stripifyBound(index_view.size()));
+	std::vector<uint16_t> strip_indices(meshopt_stripifyBound(in_indices.size()));
 
 	const size_t strip_index_count =
 		meshopt_stripify(strip_indices.data(),
-		                 index_view.data(),
-		                 index_view.size(),
+		                 in_indices.data(),
+		                 in_indices.size(),
 		                 vertex_count,
 		                 static_cast<uint16_t>(0xFFFF));
 
@@ -779,7 +766,7 @@ int main(int argc, char** argv)
 		// seems weird that this operates on a triangle list but whatever...
 		meshopt_optimizeVertexCacheStrip(indices.data(), indices.data(), indices.size(), new_vertex_count);
 
-		const std::vector<uint16_t> strip_indices = stripify(model.face_vertex_count, indices, new_vertex_count);
+		const std::vector<uint16_t> strip_indices = stripify(indices, new_vertex_count);
 		size_t longest_strip = 0;
 
 		for (auto full_strip_begin = strip_indices.begin();
