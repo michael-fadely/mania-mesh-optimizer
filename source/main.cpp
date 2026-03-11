@@ -659,7 +659,7 @@ int main(int argc, char** argv)
 	}
 
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
-	std::vector<uint16_t> indices;
+	std::vector<uint16_t> indices = model.indices;
 	std::vector<uint16_t> kos_strip_lengths;
 	std::vector<uint16_t> kos_strip_indices;
 	std::vector<uint16_t> kos_loose_tri_indices;
@@ -672,16 +672,11 @@ int main(int argc, char** argv)
 
 	auto new_vertex_count = static_cast<size_t>(model.vertices_per_frame);
 
-	// FIXME: opting out of "optimization" (remapping) can result in a crash (details below).
-	// some models have index counts that are not aligned to RSDKModel::face_vertex_count.
-	// remapping tends to fix this!
 	if (options.optimize)
 	{
 		std::cout << "optimizing..." << std::endl;
 
 		const RemapInfo remap_info = get_remap_info(model.indices, std::span(vertices.data(), model.vertices_per_frame));
-
-		indices.resize(model.indices.size());
 		remap_indices(remap_info, model.indices, indices);
 
 		std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
