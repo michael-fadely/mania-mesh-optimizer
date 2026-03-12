@@ -482,7 +482,7 @@ void remap_indices(const RemapInfo& remap_info, std::span<const uint16_t> in_ind
 	std::vector<uint16_t> result;
 	result.reserve((in_indices.size() / 4) * 6);
 
-	for (size_t i = 0; i + 3 < in_indices.size(); ++i)
+	for (size_t i = 0; i + 3 < in_indices.size(); i += 4)
 	{
 		result.emplace_back(in_indices[i + 0]);
 		result.emplace_back(in_indices[i + 1]);
