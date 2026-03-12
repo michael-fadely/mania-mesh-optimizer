@@ -294,19 +294,12 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 	write_t(file, 'L');
 	write_t(file, '\0');
 
-	uint8_t flags = model.flags;
-
-	if (!model.strip_lengths.empty())
-	{
-		flags |= RSDKModelFlags::is_stripped;
-	}
-
-	write_t(file, flags);
+	write_t(file, model.flags);
 	write_t(file, model.face_vertex_count);
 	write_t(file, model.vertices_per_frame);
 	write_t(file, model.frame_count);
 
-	if (flags & RSDKModelFlags::use_textures)
+	if (model.flags & RSDKModelFlags::use_textures)
 	{
 		for (const RSDKTexCoord& tex_coord : model.tex_coords)
 		{
@@ -315,7 +308,7 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 		}
 	}
 
-	if (flags & RSDKModelFlags::use_colors)
+	if (model.flags & RSDKModelFlags::use_colors)
 	{
 		for (const RSDKColor& color : model.colors)
 		{
@@ -323,7 +316,7 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 		}
 	}
 
-	if (flags & RSDKModelFlags::is_stripped)
+	if (model.flags & RSDKModelFlags::is_stripped)
 	{
 		// stripCount
 		write_t(file, static_cast<uint16_t>(model.strip_lengths.size()));
@@ -362,7 +355,7 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 		write_t(file, vertex.position.y);
 		write_t(file, vertex.position.z);
 
-		if (flags & RSDKModelFlags::use_normals)
+		if (model.flags & RSDKModelFlags::use_normals)
 		{
 			write_t(file, vertex.normal.x);
 			write_t(file, vertex.normal.y);
@@ -645,11 +638,14 @@ int main(int argc, char** argv)
 		return -1;
 	}
 
+	RSDKModel new_model {};
+	new_model.flags = model.flags;
+	new_model.face_vertex_count = model.face_vertex_count;
+	new_model.vertices_per_frame = model.vertices_per_frame;
+	new_model.frame_count = model.frame_count;
+	new_model.indices = model.indices;
+
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
-	std::vector<uint16_t> indices = model.indices;
-	std::vector<uint16_t> kos_strip_lengths;
-	std::vector<uint16_t> kos_strip_indices;
-	std::vector<uint16_t> kos_loose_tri_indices;
 
 	for (size_t f = 0; f < model.frame_count; ++f)
 	{
@@ -657,10 +653,10 @@ int main(int argc, char** argv)
 		get_verts_for_optimizer(model, f, out_frame_verts);
 	}
 
-	auto new_vertex_count = static_cast<size_t>(model.vertices_per_frame);
 	bool optimize_failed = false;
 	bool simplify_failed = false;
 	bool stripify_failed = false;
+	bool lighting_failed = false;
 
 	if (options.optimize)
 	{
@@ -674,7 +670,7 @@ int main(int argc, char** argv)
 		}
 		else
 		{
-			remap_indices(remap_info, model.indices, indices);
+			remap_indices(remap_info, model.indices, new_model.indices);
 
 			std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
 
@@ -687,7 +683,7 @@ int main(int argc, char** argv)
 			}
 
 			vertices = std::move(new_verts);
-			new_vertex_count = remap_info.new_vertex_count;
+			new_model.vertices_per_frame = static_cast<uint16_t>(remap_info.new_vertex_count);
 		}
 	}
 
@@ -695,8 +691,8 @@ int main(int argc, char** argv)
 	{
 		std::cout << "simplifying..." << std::endl;
 
-		std::vector<uint16_t> lod_indices(indices.size());
-		const std::span frame_vertices(&vertices[0], new_vertex_count);
+		std::vector<uint16_t> lod_indices(new_model.indices.size());
+		const std::span frame_vertices(&vertices[0], new_model.vertices_per_frame);
 
 		// these weights might need adjusting...
 		// TODO: command-line args to override weights
@@ -718,14 +714,14 @@ int main(int argc, char** argv)
 			color_weight, color_weight, color_weight, color_weight
 		};
 
-		const auto target_index_count = static_cast<size_t>(static_cast<float>(indices.size()) * options.simplify_index_threshold);
+		const auto target_index_count = static_cast<size_t>(static_cast<float>(new_model.indices.size()) * options.simplify_index_threshold);
 
 		float lod_error = 0.0f; // <- reported back from simplify func
 
 		const size_t new_index_count =
 			meshopt_simplifyWithAttributes(lod_indices.data(),
-			                               indices.data(),
-			                               indices.size(),
+			                               new_model.indices.data(),
+			                               new_model.indices.size(),
 			                               &frame_vertices[0].position.x,
 			                               frame_vertices.size(),
 			                               sizeof(VertexForOptimizer),
@@ -739,7 +735,7 @@ int main(int argc, char** argv)
 			                               /* options */ 0,
 			                               &lod_error);
 
-		if (new_index_count >= indices.size())
+		if (new_index_count >= new_model.indices.size())
 		{
 			simplify_failed = true;
 		}
@@ -750,9 +746,9 @@ int main(int argc, char** argv)
 
 			std::cout << "error rate: " << lod_error << std::endl;
 
-			const RemapInfo remap_info = get_remap_info(lod_indices, std::span(vertices.data(), new_vertex_count));
+			const RemapInfo remap_info = get_remap_info(lod_indices, std::span(vertices.data(), new_model.vertices_per_frame));
 
-			if (remap_info.new_vertex_count < new_vertex_count)
+			if (remap_info.new_vertex_count < new_model.vertices_per_frame)
 			{
 				std::vector<uint16_t> temp_indices(lod_indices.size());
 				remap_indices(remap_info, lod_indices, temp_indices);
@@ -762,36 +758,40 @@ int main(int argc, char** argv)
 
 				for (size_t f = 0; f < model.frame_count; ++f)
 				{
-					const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
+					const std::span in_verts(&vertices[new_model.vertices_per_frame * f], new_model.vertices_per_frame);
 					const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
 
 					remap_vertices(remap_info, in_verts, out_verts);
 				}
 
 				vertices = std::move(new_verts);
-				new_vertex_count = remap_info.new_vertex_count;
+				new_model.vertices_per_frame = remap_info.new_vertex_count;
 			}
 
-			indices = std::move(lod_indices);
+			new_model.indices = std::move(lod_indices);
 		}
 	}
 
 	if (options.optimize || options.simplify)
 	{
-		const auto vert_frame_delta = static_cast<ptrdiff_t>(new_vertex_count - static_cast<size_t>(model.vertices_per_frame));
+		const auto vert_frame_delta = static_cast<ptrdiff_t>(static_cast<size_t>(new_model.vertices_per_frame) - static_cast<size_t>(model.vertices_per_frame));
 		const auto vertex_delta = static_cast<ptrdiff_t>(vertices.size() - model.vertices.size());
-		const auto index_delta = static_cast<ptrdiff_t>(indices.size() - model.indices.size());
+		const auto index_delta = static_cast<ptrdiff_t>(new_model.indices.size() - model.indices.size());
+
+		const auto old_face_count = (model.indices.size() / model.face_vertex_count);
+		const auto new_face_count = (new_model.indices.size() / new_model.face_vertex_count);
+		const auto face_count_delta = static_cast<ptrdiff_t>(new_face_count - old_face_count);
 
 		std::cout
 			<< std::format("optimization stats:\n"
 			               "\tverts per frame: {} -> {} ({})\n"
 			               "\t    total verts: {} -> {} ({})\n"
-			               "\t    index count: {} -> {} ({})\n"
-			               "\t     face count: {} -> {} ({})\n",
-			               model.vertices_per_frame, new_vertex_count, vert_frame_delta,
+			               "\t        indices: {} -> {} ({})\n"
+			               "\t          faces: {} -> {} ({})\n",
+			               model.vertices_per_frame, new_model.vertices_per_frame, vert_frame_delta,
 			               model.vertices.size(), vertices.size(), vertex_delta,
-			               model.indices.size(), indices.size(), index_delta,
-			               (model.indices.size() / model.face_vertex_count), (indices.size() / model.face_vertex_count), (index_delta / model.face_vertex_count))
+			               model.indices.size(), new_model.indices.size(), index_delta,
+			               old_face_count, new_face_count, face_count_delta)
 			<< std::endl;
 	}
 
@@ -800,10 +800,15 @@ int main(int argc, char** argv)
 		std::cout << "stripifying..." << std::endl;
 
 		// seems weird that this operates on a triangle list but whatever...
-		meshopt_optimizeVertexCacheStrip(indices.data(), indices.data(), indices.size(), new_vertex_count);
+		meshopt_optimizeVertexCacheStrip(new_model.indices.data(),
+		                                 new_model.indices.data(),
+		                                 new_model.indices.size(),
+		                                 new_model.vertices_per_frame);
 
-		const std::vector<uint16_t> strip_indices = stripify(indices, new_vertex_count);
+		const std::vector<uint16_t> strip_indices = stripify(new_model.indices, new_model.vertices_per_frame);
 		size_t longest_strip = 0;
+
+		new_model.strip_indices.reserve(strip_indices.size());
 
 		for (auto full_strip_begin = strip_indices.begin();
 		     full_strip_begin != strip_indices.end();)
@@ -816,7 +821,7 @@ int main(int argc, char** argv)
 
 				if (full_distance == 3)
 				{
-					kos_loose_tri_indices.insert(kos_loose_tri_indices.end(), slice_begin, full_strip_end);
+					new_model.loose_tri_indices.insert(new_model.loose_tri_indices.end(), slice_begin, full_strip_end);
 					break;
 				}
 
@@ -826,8 +831,8 @@ int main(int argc, char** argv)
 				if (slice_distance > 3)
 				{
 					longest_strip = std::max(longest_strip, static_cast<size_t>(slice_distance));
-					kos_strip_lengths.push_back(static_cast<uint16_t>(slice_distance));
-					kos_strip_indices.insert(kos_strip_indices.end(), slice_begin, slice_end);
+					new_model.strip_lengths.push_back(static_cast<uint16_t>(slice_distance));
+					new_model.strip_indices.insert(new_model.strip_indices.end(), slice_begin, slice_end);
 				}
 				else
 				{
@@ -850,9 +855,9 @@ int main(int argc, char** argv)
 			full_strip_begin = std::next(full_strip_end);
 		}
 
-		kos_strip_lengths.shrink_to_fit();
-		kos_strip_indices.shrink_to_fit();
-		kos_loose_tri_indices.shrink_to_fit();
+		new_model.strip_lengths.shrink_to_fit();
+		new_model.strip_indices.shrink_to_fit();
+		new_model.loose_tri_indices.shrink_to_fit();
 
 		std::cout
 			<< std::format("strip stats:\n"
@@ -861,46 +866,34 @@ int main(int argc, char** argv)
 			               "\tlongest strip: {}\n"
 			               "\tstrip indices: {}\n"
 			               "\ttotal indices: {} (vs {})\n",
-			               kos_strip_lengths.size(),
-			               kos_loose_tri_indices.size() / 3,
+			               new_model.strip_lengths.size(),
+			               new_model.loose_tri_indices.size() / 3,
 			               longest_strip,
-			               strip_indices.size(),
-			               kos_loose_tri_indices.size() + strip_indices.size(), indices.size())
+			               new_model.strip_indices.size(),
+			               new_model.loose_tri_indices.size() + new_model.strip_indices.size(), new_model.indices.size())
 			<< std::endl;
 
-		stripify_failed = kos_strip_lengths.empty();
+		if (new_model.strip_lengths.empty())
+		{
+			stripify_failed = true;
+		}
+		else
+		{
+			new_model.flags |= RSDKModelFlags::is_stripped;
+		}
 	}
 
-	// TODO: bake lighting before this, check its result as well
-	if (!options.bake_lighting &&
-	    optimize_failed &&
-	    simplify_failed &&
-	    stripify_failed)
-	{
-		std::cout << "no changes were made; not writing new file." << std::endl;
-		return 0;
-	}
-
-	RSDKModel new_model {};
-	new_model.flags = model.flags;
-	new_model.face_vertex_count = model.face_vertex_count;
-	new_model.vertices_per_frame = static_cast<uint16_t>(new_vertex_count);
-	new_model.frame_count = model.frame_count;
+	// now we convert back to RSDK format so we can save our changes
 	new_model.vertices.resize(vertices.size());
-	new_model.indices = std::move(indices);
-	// the presence of this member ensures inclusion of the "stripped" flag on write
-	new_model.strip_lengths = std::move(kos_strip_lengths);
-	new_model.strip_indices = std::move(kos_strip_indices);
-	new_model.loose_tri_indices = std::move(kos_loose_tri_indices);
 
 	if (new_model.flags & RSDKModelFlags::use_textures)
 	{
-		new_model.tex_coords.resize(new_vertex_count);
+		new_model.tex_coords.resize(new_model.vertices_per_frame);
 	}
 
 	if (new_model.flags & RSDKModelFlags::use_colors)
 	{
-		new_model.colors.resize(new_vertex_count);
+		new_model.colors.resize(new_model.vertices_per_frame);
 	}
 
 	for (size_t i = 0; i < vertices.size(); ++i)
@@ -914,7 +907,7 @@ int main(int argc, char** argv)
 
 	if (new_model.flags & (RSDKModelFlags::use_textures | RSDKModelFlags::use_colors))
 	{
-		for (size_t i = 0; i < new_vertex_count; ++i)
+		for (size_t i = 0; i < new_model.vertices_per_frame; ++i)
 		{
 			const VertexForOptimizer& old_vert = vertices[i];
 
@@ -939,13 +932,23 @@ int main(int argc, char** argv)
 	if (options.bake_lighting)
 	{
 		std::cout << "baking lighting..." << std::endl;
-		// TODO: check result, don't write file on failure
-		bake_lighting(new_model,
-		              options.bake_light_direction,
-		              options.bake_ambient_strength,
-		              options.bake_diffuse_strength,
-		              options.bake_diffuse_strength,
-		              options.bake_specular_power);
+
+		lighting_failed =
+			!bake_lighting(new_model,
+			               options.bake_light_direction,
+			               options.bake_ambient_strength,
+			               options.bake_diffuse_strength,
+			               options.bake_diffuse_strength,
+			               options.bake_specular_power);
+	}
+
+	if (optimize_failed &&
+	    simplify_failed &&
+	    stripify_failed &&
+	    lighting_failed)
+	{
+		std::cout << "no changes were made; not writing new file." << std::endl;
+		return 0;
 	}
 
 	std::cout << "writing to file: " << options.output_path << std::endl;
