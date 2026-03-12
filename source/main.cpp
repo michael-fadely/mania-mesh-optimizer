@@ -658,26 +658,37 @@ int main(int argc, char** argv)
 	}
 
 	auto new_vertex_count = static_cast<size_t>(model.vertices_per_frame);
+	bool optimize_failed = false;
+	bool simplify_failed = false;
+	bool stripify_failed = false;
 
 	if (options.optimize)
 	{
 		std::cout << "optimizing..." << std::endl;
 
 		const RemapInfo remap_info = get_remap_info(model.indices, std::span(vertices.data(), model.vertices_per_frame));
-		remap_indices(remap_info, model.indices, indices);
 
-		std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
-
-		for (size_t f = 0; f < model.frame_count; ++f)
+		if (remap_info.new_vertex_count >= model.vertices_per_frame)
 		{
-			const std::span in_verts(&vertices[model.vertices_per_frame * f], model.vertices_per_frame);
-			const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
-
-			remap_vertices(remap_info, in_verts, out_verts);
+			optimize_failed = true;
 		}
+		else
+		{
+			remap_indices(remap_info, model.indices, indices);
 
-		vertices = std::move(new_verts);
-		new_vertex_count = remap_info.new_vertex_count;
+			std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
+
+			for (size_t f = 0; f < model.frame_count; ++f)
+			{
+				const std::span in_verts(&vertices[model.vertices_per_frame * f], model.vertices_per_frame);
+				const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
+
+				remap_vertices(remap_info, in_verts, out_verts);
+			}
+
+			vertices = std::move(new_verts);
+			new_vertex_count = remap_info.new_vertex_count;
+		}
 	}
 
 	if (options.simplify)
@@ -728,35 +739,60 @@ int main(int argc, char** argv)
 			                               /* options */ 0,
 			                               &lod_error);
 
-		lod_indices.resize(new_index_count);
-		lod_indices.shrink_to_fit();
-
-		indices = std::move(lod_indices);
-
-		std::cout << "error rate: " << lod_error << std::endl;
-
+		if (new_index_count >= indices.size())
 		{
-			const RemapInfo remap_info = get_remap_info(indices, std::span(vertices.data(), new_vertex_count));
-
-			{
-				std::vector<uint16_t> temp_indices(indices.size());
-				remap_indices(remap_info, indices, temp_indices);
-				indices = std::move(temp_indices);
-			}
-
-			std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
-
-			for (size_t f = 0; f < model.frame_count; ++f)
-			{
-				const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
-				const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
-
-				remap_vertices(remap_info, in_verts, out_verts);
-			}
-
-			vertices = std::move(new_verts);
-			new_vertex_count = remap_info.new_vertex_count;
+			simplify_failed = true;
 		}
+		else
+		{
+			lod_indices.resize(new_index_count);
+			lod_indices.shrink_to_fit();
+
+			std::cout << "error rate: " << lod_error << std::endl;
+
+			const RemapInfo remap_info = get_remap_info(lod_indices, std::span(vertices.data(), new_vertex_count));
+
+			if (remap_info.new_vertex_count < new_vertex_count)
+			{
+				std::vector<uint16_t> temp_indices(lod_indices.size());
+				remap_indices(remap_info, lod_indices, temp_indices);
+				lod_indices = std::move(temp_indices);
+
+				std::vector<VertexForOptimizer> new_verts(remap_info.new_vertex_count * model.frame_count);
+
+				for (size_t f = 0; f < model.frame_count; ++f)
+				{
+					const std::span in_verts(&vertices[new_vertex_count * f], new_vertex_count);
+					const std::span out_verts(&new_verts[remap_info.new_vertex_count * f], remap_info.new_vertex_count);
+
+					remap_vertices(remap_info, in_verts, out_verts);
+				}
+
+				vertices = std::move(new_verts);
+				new_vertex_count = remap_info.new_vertex_count;
+			}
+
+			indices = std::move(lod_indices);
+		}
+	}
+
+	if (options.optimize || options.simplify)
+	{
+		const auto vert_frame_delta = static_cast<ptrdiff_t>(new_vertex_count - static_cast<size_t>(model.vertices_per_frame));
+		const auto vertex_delta = static_cast<ptrdiff_t>(vertices.size() - model.vertices.size());
+		const auto index_delta = static_cast<ptrdiff_t>(indices.size() - model.indices.size());
+
+		std::cout
+			<< std::format("optimization stats:\n"
+			               "\tverts per frame: {} -> {} ({})\n"
+			               "\t    total verts: {} -> {} ({})\n"
+			               "\t    index count: {} -> {} ({})\n"
+			               "\t     face count: {} -> {} ({})\n",
+			               model.vertices_per_frame, new_vertex_count, vert_frame_delta,
+			               model.vertices.size(), vertices.size(), vertex_delta,
+			               model.indices.size(), indices.size(), index_delta,
+			               (model.indices.size() / model.face_vertex_count), (indices.size() / model.face_vertex_count), (index_delta / model.face_vertex_count))
+			<< std::endl;
 	}
 
 	if (options.stripify)
@@ -831,35 +867,18 @@ int main(int argc, char** argv)
 			               strip_indices.size(),
 			               kos_loose_tri_indices.size() + strip_indices.size(), indices.size())
 			<< std::endl;
+
+		stripify_failed = kos_strip_lengths.empty();
 	}
 
-	if (!options.bake_lighting)
+	// TODO: bake lighting before this, check its result as well
+	if (!options.bake_lighting &&
+	    optimize_failed &&
+	    simplify_failed &&
+	    stripify_failed)
 	{
-		const size_t vert_frame_delta = static_cast<size_t>(model.vertices_per_frame) - new_vertex_count;
-		const size_t vertex_delta = model.vertices.size() - vertices.size();
-		const size_t index_delta = model.indices.size() - indices.size();
-
-		if (!vert_frame_delta &&
-		    !vertex_delta &&
-		    !index_delta &&
-		    kos_strip_lengths.empty() &&
-		    kos_strip_indices.empty())
-		{
-			std::cout << "no changes were made; not writing new file." << std::endl;
-			return 0;
-		}
-
-		std::cout
-			<< std::format("optimization stats:\n"
-			               "\tverts per frame: {} -> {} (-{})\n"
-			               "\t    total verts: {} -> {} (-{})\n"
-			               "\t    index count: {} -> {} (-{})\n"
-			               "\t     face count: {} -> {} (-{})\n",
-			               model.vertices_per_frame, new_vertex_count, vert_frame_delta,
-			               model.vertices.size(), vertices.size(), vertex_delta,
-			               model.indices.size(), indices.size(), index_delta,
-			               (model.indices.size() / model.face_vertex_count), (indices.size() / model.face_vertex_count), (index_delta / model.face_vertex_count))
-			<< std::endl;
+		std::cout << "no changes were made; not writing new file." << std::endl;
+		return 0;
 	}
 
 	RSDKModel new_model {};
@@ -920,6 +939,7 @@ int main(int argc, char** argv)
 	if (options.bake_lighting)
 	{
 		std::cout << "baking lighting..." << std::endl;
+		// TODO: check result, don't write file on failure
 		bake_lighting(new_model,
 		              options.bake_light_direction,
 		              options.bake_ambient_strength,
