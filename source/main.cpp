@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <meshoptimizer.h>
@@ -631,11 +632,15 @@ int main(int argc, char** argv)
 		               (model.indices.size() / model.face_vertex_count))
 		<< std::endl;
 
-	// TODO: proper quad support (currently causes crash in remapping stage)
-	if (model.face_vertex_count != 3)
+	if (model.face_vertex_count != 3 && model.face_vertex_count != 4)
 	{
 		std::cerr << "unsupported vertex-per-face count: " << static_cast<uint16_t>(model.face_vertex_count) << std::endl;
 		return -1;
+	}
+
+	if (model.face_vertex_count == 4 && (options.simplify || options.stripify))
+	{
+		std::cout << "WARNING: quads will be converted to tris during simplification/strip generation! this will skew stat output!" << std::endl;
 	}
 
 	RSDKModel new_model {};
@@ -646,6 +651,7 @@ int main(int argc, char** argv)
 	new_model.indices = model.indices;
 
 	std::vector<VertexForOptimizer> vertices(model.vertices_per_frame * static_cast<size_t>(model.frame_count));
+	std::vector<uint16_t> quad_indices;
 
 	for (size_t f = 0; f < model.frame_count; ++f)
 	{
@@ -664,8 +670,9 @@ int main(int argc, char** argv)
 
 		const RemapInfo remap_info = get_remap_info(model.indices, std::span(vertices.data(), model.vertices_per_frame));
 
-		if (remap_info.new_vertex_count >= model.vertices_per_frame)
+		if (!remap_info.new_vertex_count || remap_info.new_vertex_count >= model.vertices_per_frame)
 		{
+			std::cout << "(failed; discarding changes)" << std::endl;
 			optimize_failed = true;
 		}
 		else
@@ -685,6 +692,12 @@ int main(int argc, char** argv)
 			vertices = std::move(new_verts);
 			new_model.vertices_per_frame = static_cast<uint16_t>(remap_info.new_vertex_count);
 		}
+	}
+
+	if (new_model.face_vertex_count == 4 && (options.simplify || options.stripify))
+	{
+		quad_indices = std::exchange(new_model.indices, quad_to_tri_indices(new_model.indices));
+		new_model.face_vertex_count = 3;
 	}
 
 	if (options.simplify)
@@ -735,8 +748,9 @@ int main(int argc, char** argv)
 			                               /* options */ 0,
 			                               &lod_error);
 
-		if (new_index_count >= new_model.indices.size())
+		if (!new_index_count || new_index_count >= new_model.indices.size())
 		{
+			std::cout << "(failed; discarding changes)" << std::endl;
 			simplify_failed = true;
 		}
 		else
@@ -748,7 +762,7 @@ int main(int argc, char** argv)
 
 			const RemapInfo remap_info = get_remap_info(lod_indices, std::span(vertices.data(), new_model.vertices_per_frame));
 
-			if (remap_info.new_vertex_count < new_model.vertices_per_frame)
+			if (remap_info.new_vertex_count > 0 && remap_info.new_vertex_count < new_model.vertices_per_frame)
 			{
 				std::vector<uint16_t> temp_indices(lod_indices.size());
 				remap_indices(remap_info, lod_indices, temp_indices);
@@ -784,10 +798,12 @@ int main(int argc, char** argv)
 
 		std::cout
 			<< std::format("optimization stats:\n"
+			               "\t verts per face: {} -> {}\n"
 			               "\tverts per frame: {} -> {} ({})\n"
 			               "\t    total verts: {} -> {} ({})\n"
 			               "\t        indices: {} -> {} ({})\n"
 			               "\t          faces: {} -> {} ({})\n",
+			               static_cast<uint16_t>(model.face_vertex_count), static_cast<uint16_t>(new_model.face_vertex_count),
 			               model.vertices_per_frame, new_model.vertices_per_frame, vert_frame_delta,
 			               model.vertices.size(), vertices.size(), vertex_delta,
 			               model.indices.size(), new_model.indices.size(), index_delta,
@@ -799,7 +815,6 @@ int main(int argc, char** argv)
 	{
 		std::cout << "stripifying..." << std::endl;
 
-		// seems weird that this operates on a triangle list but whatever...
 		meshopt_optimizeVertexCacheStrip(new_model.indices.data(),
 		                                 new_model.indices.data(),
 		                                 new_model.indices.size(),
@@ -875,12 +890,21 @@ int main(int argc, char** argv)
 
 		if (new_model.strip_lengths.empty())
 		{
+			std::cout << "(failed; discarding changes)" << std::endl;
 			stripify_failed = true;
 		}
 		else
 		{
 			new_model.flags |= RSDKModelFlags::is_stripped;
 		}
+	}
+
+	// if simplification and stripification both failed, restore quad indices
+	if (!quad_indices.empty() && new_model.face_vertex_count < model.face_vertex_count &&
+	    simplify_failed && stripify_failed)
+	{
+		new_model.indices = std::move(quad_indices);
+		new_model.face_vertex_count = model.face_vertex_count;
 	}
 
 	// now we convert back to RSDK format so we can save our changes
