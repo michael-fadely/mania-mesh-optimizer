@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
@@ -254,13 +255,13 @@ std::optional<RSDKModel> load_model(std::ifstream& file)
 	return model;
 }
 
-std::optional<RSDKModel> load_model(const std::string& path)
+std::optional<RSDKModel> load_model(const std::filesystem::path& file_path)
 {
-	std::ifstream input_file(path, std::ios::binary);
+	std::ifstream input_file(file_path, std::ios::binary);
 
 	if (!input_file.is_open())
 	{
-		std::cerr << "failed to open file: " << path << std::endl;
+		std::cerr << "failed to open file: " << file_path << std::endl;
 		return std::nullopt;
 	}
 
@@ -365,13 +366,13 @@ void write_model(std::ofstream& file, const RSDKModel& model)
 	}
 }
 
-bool write_model(const std::string& path, const RSDKModel& model)
+bool write_model(const std::filesystem::path& file_path, const RSDKModel& model)
 {
-	std::ofstream output_file(path, std::ios::binary | std::ios::trunc);
+	std::ofstream output_file(file_path, std::ios::binary | std::ios::trunc);
 
 	if (!output_file.is_open())
 	{
-		std::cerr << "failed write file: " << path << std::endl;
+		std::cerr << "failed write file: " << file_path << std::endl;
 		return false;
 	}
 
@@ -568,8 +569,10 @@ bool bake_lighting(RSDKModel& model,
 
 struct Options
 {
-	std::string input_path;
-	std::string output_path;
+	std::filesystem::path input_file_path;
+	std::filesystem::path output_file_path;
+
+	bool create_output_dir = true;
 
 	bool optimize = true;
 	bool simplify = true;
@@ -594,21 +597,21 @@ int main(int argc, char** argv)
 {
 	const Options options = parse_args(std::span(argv, argc));
 
-	if (options.input_path.empty())
+	if (options.input_file_path.empty())
 	{
 		std::cerr << "no input file specified. use -i or --input" << std::endl;
 		return -1;
 	}
 
-	if (options.output_path.empty())
+	if (options.output_file_path.empty())
 	{
 		std::cerr << "no output file specified. use -o or --output" << std::endl;
 		return -1;
 	}
 
-	std::cout << "loading file: " << options.input_path << std::endl << std::endl;
+	std::cout << "loading file: " << options.input_file_path << std::endl << std::endl;
 
-	const std::optional<RSDKModel> model_maybe = load_model(options.input_path);
+	const std::optional<RSDKModel> model_maybe = load_model(options.input_file_path);
 
 	if (!model_maybe.has_value())
 	{
@@ -975,9 +978,34 @@ int main(int argc, char** argv)
 		return 0;
 	}
 
-	std::cout << "writing to file: " << options.output_path << std::endl;
+	if (options.output_file_path.has_parent_path())
+	{
+		const auto output_dir = options.output_file_path.parent_path();
 
-	if (!write_model(options.output_path, new_model))
+		if (!std::filesystem::exists(output_dir))
+		{
+			if (options.create_output_dir)
+			{
+				std::cout << "creating output directory: " << output_dir << std::endl;
+
+				if (!std::filesystem::create_directories(output_dir) &&
+				    !std::filesystem::exists(output_dir))
+				{
+					std::cout << "failed! :( try creating it manually" << std::endl;
+					return -1;
+				}
+			}
+			else
+			{
+				std::cout << "output directory does not exist! please create it: " << output_dir << std::endl;
+				return -1;
+			}
+		}
+	}
+
+	std::cout << "writing to file: " << options.output_file_path << std::endl;
+
+	if (!write_model(options.output_file_path, new_model))
 	{
 		return -1;
 	}
@@ -1063,7 +1091,7 @@ bool parse_uint16(const std::string_view& arg, uint16_t* value)
 		{
 			if (i + 1 < args.size())
 			{
-				options.input_path = args[++i];
+				options.input_file_path = args[++i];
 			}
 
 			continue;
@@ -1073,7 +1101,19 @@ bool parse_uint16(const std::string_view& arg, uint16_t* value)
 		{
 			if (i + 1 < args.size())
 			{
-				options.output_path = args[++i];
+				options.output_file_path = args[++i];
+			}
+
+			continue;
+		}
+
+		if (arg == "--create-output-dir" || arg == "--create-output-directory")
+		{
+			options.create_output_dir = true;
+
+			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.create_output_dir))
+			{
+				++i;
 			}
 
 			continue;
