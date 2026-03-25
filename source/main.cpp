@@ -575,9 +575,9 @@ struct Options
 	bool create_output_dir = true;
 
 	bool optimize = true;
-	bool simplify = true;
-	bool stripify = true;
-	bool bake_lighting = true;
+	bool simplify = false;
+	bool stripify = false;
+	bool bake_lighting = false;
 
 	uint16_t strip_max_points = 256;
 
