@@ -662,10 +662,10 @@ int main(int argc, char** argv)
 		get_verts_for_optimizer(model, f, out_frame_verts);
 	}
 
-	bool optimize_failed = false;
-	bool simplify_failed = false;
-	bool stripify_failed = false;
-	bool lighting_failed = false;
+	bool optimize_failed = !options.optimize;
+	bool simplify_failed = !options.simplify;
+	bool stripify_failed = !options.stripify;
+	bool lighting_failed = !options.bake_lighting;
 
 	if (options.optimize)
 	{
