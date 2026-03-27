@@ -8,8 +8,13 @@ endif ()
 
 project(mania-mesh-optimizer VERSION 1.0 LANGUAGES CXX)
 
-add_executable(mania-mesh-optimizer
-               source/main.cpp)
+set(SOURCES source/main.cpp)
+
+if (WIN32)
+    list(APPEND SOURCES source/longPathAware.manifest)
+endif ()
+
+add_executable(mania-mesh-optimizer ${SOURCES})
 
 add_subdirectory(dependencies/meshoptimizer)
 target_link_libraries(mania-mesh-optimizer meshoptimizer)
