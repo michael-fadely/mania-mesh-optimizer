@@ -591,11 +591,18 @@ struct Options
 	float bake_specular_power = 1.5f;
 };
 
-[[nodiscard]] Options parse_args(std::span<char*> args);
+[[nodiscard]] std::optional<Options> parse_args(std::span<char*> args);
 
 int main(int argc, char** argv)
 {
-	const Options options = parse_args(std::span(argv, argc));
+	const std::optional<Options> options_maybe = parse_args(std::span(argv, argc));
+
+	if (!options_maybe.has_value())
+	{
+		return -1;
+	}
+
+	const Options& options = options_maybe.value();
 
 	if (options.input_file_path.empty())
 	{
@@ -1052,7 +1059,7 @@ bool parse_bool(const std::string_view& arg, bool* value)
 		return true;
 	}
 
-	throw std::runtime_error("invalid value for argument");
+	throw std::runtime_error(std::format("invalid value \"{}\" for argument", arg));
 }
 
 bool parse_float(const std::string_view& arg, float* value)
@@ -1079,7 +1086,7 @@ bool parse_uint16(const std::string_view& arg, uint16_t* value)
 	return true;
 }
 
-[[nodiscard]] Options parse_args(std::span<char*> args)
+[[nodiscard]] std::optional<Options> parse_args(std::span<char*> args)
 {
 	Options options;
 
@@ -1087,169 +1094,177 @@ bool parse_uint16(const std::string_view& arg, uint16_t* value)
 	{
 		const std::string_view arg(args[i]);
 
-		if (arg == "-i" || arg == "--input")
+		try
 		{
-			if (i + 1 < args.size())
+			if (arg == "-i" || arg == "--input")
 			{
-				options.input_file_path = args[++i];
+				if (i + 1 < args.size())
+				{
+					options.input_file_path = args[++i];
+				}
+
+				continue;
 			}
 
-			continue;
+			if (arg == "-o" || arg == "--output")
+			{
+				if (i + 1 < args.size())
+				{
+					options.output_file_path = args[++i];
+				}
+
+				continue;
+			}
+
+			if (arg == "--create-output-dir" || arg == "--create-output-directory")
+			{
+				options.create_output_dir = true;
+
+				if (i + 1 < args.size() && parse_bool(args[i + 1], &options.create_output_dir))
+				{
+					++i;
+				}
+
+				continue;
+			}
+
+			if (arg == "--optimize")
+			{
+				options.optimize = true;
+
+				if (i + 1 < args.size() && parse_bool(args[i + 1], &options.optimize))
+				{
+					++i;
+				}
+
+				continue;
+			}
+
+			if (arg == "--simplify")
+			{
+				options.simplify = true;
+
+				if (i + 1 < args.size() && parse_bool(args[i + 1], &options.simplify))
+				{
+					++i;
+				}
+
+				continue;
+			}
+
+			if (arg == "--stripify")
+			{
+				options.stripify = true;
+
+				if (i + 1 < args.size() && parse_bool(args[i + 1], &options.stripify))
+				{
+					++i;
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-lighting")
+			{
+				options.bake_lighting = true;
+
+				if (i + 1 < args.size() && parse_bool(args[i + 1], &options.bake_lighting))
+				{
+					++i;
+				}
+
+				continue;
+			}
+
+			if (arg == "--strip-max-points")
+			{
+				if (++i == args.size() || !parse_uint16(args[i], &options.strip_max_points))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				options.strip_max_points = std::max<uint16_t>(options.strip_max_points, 4);
+
+				continue;
+			}
+
+			if (arg == "--simplify-index-threshold")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.simplify_index_threshold))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--simplify-target-error")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.simplify_target_error))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-light-direction")
+			{
+				if (args.size() - i < 4 ||
+				    !parse_float(args[++i], &options.bake_light_direction.x) ||
+				    !parse_float(args[++i], &options.bake_light_direction.y) ||
+				    !parse_float(args[++i], &options.bake_light_direction.z))
+				{
+					throw std::runtime_error("missing values for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-ambient-strength")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.bake_ambient_strength))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-diffuse-strength")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.bake_diffuse_strength))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-specular-strength")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.bake_specular_strength))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
+
+			if (arg == "--bake-specular-power")
+			{
+				if (++i == args.size() || !parse_float(args[i], &options.bake_specular_power))
+				{
+					throw std::runtime_error("missing value for argument");
+				}
+
+				continue;
+			}
 		}
-
-		if (arg == "-o" || arg == "--output")
+		catch (const std::exception& ex)
 		{
-			if (i + 1 < args.size())
-			{
-				options.output_file_path = args[++i];
-			}
-
-			continue;
-		}
-
-		if (arg == "--create-output-dir" || arg == "--create-output-directory")
-		{
-			options.create_output_dir = true;
-
-			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.create_output_dir))
-			{
-				++i;
-			}
-
-			continue;
-		}
-
-		if (arg == "--optimize")
-		{
-			options.optimize = true;
-
-			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.optimize))
-			{
-				++i;
-			}
-
-			continue;
-		}
-
-		if (arg == "--simplify")
-		{
-			options.simplify = true;
-
-			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.simplify))
-			{
-				++i;
-			}
-
-			continue;
-		}
-
-		if (arg == "--stripify")
-		{
-			options.stripify = true;
-
-			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.stripify))
-			{
-				++i;
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-lighting")
-		{
-			options.bake_lighting = true;
-
-			if (i + 1 < args.size() && parse_bool(args[i + 1], &options.bake_lighting))
-			{
-				++i;
-			}
-
-			continue;
-		}
-
-		if (arg == "--strip-max-points")
-		{
-			if (++i == args.size() || !parse_uint16(args[i], &options.strip_max_points))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			options.strip_max_points = std::max<uint16_t>(options.strip_max_points, 4);
-
-			continue;
-		}
-
-		if (arg == "--simplify-index-threshold")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.simplify_index_threshold))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--simplify-target-error")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.simplify_target_error))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-light-direction")
-		{
-			if (args.size() - i < 4 ||
-			    !parse_float(args[++i], &options.bake_light_direction.x) ||
-			    !parse_float(args[++i], &options.bake_light_direction.y) ||
-			    !parse_float(args[++i], &options.bake_light_direction.z))
-			{
-				throw std::runtime_error("missing values for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-ambient-strength")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.bake_ambient_strength))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-diffuse-strength")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.bake_diffuse_strength))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-specular-strength")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.bake_specular_strength))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
-		}
-
-		if (arg == "--bake-specular-power")
-		{
-			if (++i == args.size() || !parse_float(args[i], &options.bake_specular_power))
-			{
-				throw std::runtime_error("missing value for argument");
-			}
-
-			continue;
+			std::cerr << "error parsing argument \"" << arg << "\": " << ex.what() << std::endl;
+			return std::nullopt;
 		}
 	}
 
