@@ -549,6 +549,7 @@ bool bake_lighting(RSDKModel& model,
 		}
 
 		average_normal /= static_cast<float>(model.frame_count);
+		average_normal = average_normal.normalized();
 
 		const float ndotl = dot(average_normal, light_direction);
 
